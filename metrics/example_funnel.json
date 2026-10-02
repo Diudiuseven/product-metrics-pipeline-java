@@ -1,0 +1,15 @@
+{
+  "id": "example_funnel",
+  "type": "FUNNEL",
+  "funnel": {
+    "steps": [
+      { "id": "visit",  "eventType": "page_view" },
+      { "id": "signup", "eventType": "signup" },
+      { "id": "pay",    "eventType": "purchase" }
+    ],
+    "window": "PT1H",
+    "windowFrom": "FIRST_STEP",
+    "dimensions": ["country", "platform"],
+    "bucketGranularity": "DAY"
+  }
+}

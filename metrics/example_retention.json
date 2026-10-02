@@ -1,0 +1,12 @@
+{
+  "id": "example_retention",
+  "type": "RETENTION",
+  "retention": {
+    "anchorEventType": "app_open",
+    "returnEventType": "app_open",
+    "periods": ["P1D", "P7D", "P30D"],
+    "returnWindow": "P1D",
+    "cohortGranularity": "DAY",
+    "dimensions": ["country"]
+  }
+}

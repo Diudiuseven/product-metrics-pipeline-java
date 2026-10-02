@@ -67,6 +67,7 @@ public class ReplayEngine {
     }
 
     public FunnelContribution evaluateFunnel(MetricDefinition def, List<StoredEvent> userEvents) {
+        List<StoredEvent> sorted = sortedByTime(userEvents);
         FunnelSpec spec = def.getFunnel();
         List<StepDefinition> steps = spec.steps();
         int n = steps.size();
@@ -86,7 +87,7 @@ public class ReplayEngine {
         FunnelVerdict attemptVerdict = null;
         StoredEvent entryEvent = null;
 
-        for (StoredEvent se : userEvents) {
+        for (StoredEvent se : sorted) {
             if (curStep == 0) {
                 if (matchesStep(se, steps.get(0))) {
                     entryEvent = se;
@@ -141,8 +142,8 @@ public class ReplayEngine {
                 attemptVerdict = FunnelVerdict.SKIPPED_STEP;
             }
             if (attemptVerdict != null) {
+                bestMask |= attemptMask;
                 if (attemptVerdict == FunnelVerdict.CONVERTED) {
-                    bestMask = attemptMask;
                     bestVerdict = FunnelVerdict.CONVERTED;
                 } else if (verdictRank(attemptVerdict) > verdictRank(bestVerdict)) {
                     bestVerdict = attemptVerdict;
@@ -155,6 +156,7 @@ public class ReplayEngine {
         if (curStep > 0 && attemptVerdict == null) {
             attemptVerdict = Instant.now().isAfter(start.plus(window))
                     ? FunnelVerdict.MISSING : FunnelVerdict.PENDING;
+            bestMask |= attemptMask;
             if (verdictRank(attemptVerdict) > verdictRank(bestVerdict)) {
                 bestVerdict = attemptVerdict;
             }
@@ -168,9 +170,10 @@ public class ReplayEngine {
     }
 
     public RetentionContribution evaluateRetention(MetricDefinition def, List<StoredEvent> userEvents) {
+        List<StoredEvent> sorted = sortedByTime(userEvents);
         RetentionSpec spec = def.getRetention();
         StoredEvent anchorEvent = null;
-        for (StoredEvent se : userEvents) {
+        for (StoredEvent se : sorted) {
             if (matchesEventType(se, spec.anchorEventType())) {
                 anchorEvent = se;
                 break;
@@ -187,7 +190,7 @@ public class ReplayEngine {
         for (int i = 0; i < spec.periods().size(); i++) {
             Instant from = anchor.plus(spec.periods().get(i));
             Instant to = from.plus(window);
-            for (StoredEvent se : userEvents) {
+            for (StoredEvent se : sorted) {
                 if (matchesEventType(se, spec.returnEventType())
                         && !se.event().eventTime().isBefore(from)
                         && se.event().eventTime().isBefore(to)) {
@@ -203,6 +206,15 @@ public class ReplayEngine {
     }
 
     // --------------------------- helpers ---------------------------
+
+    private static List<StoredEvent> sortedByTime(List<StoredEvent> events) {
+        List<StoredEvent> sorted = new ArrayList<>(events);
+        sorted.sort((a, b) -> {
+            int c = a.event().eventTime().compareTo(b.event().eventTime());
+            return c != 0 ? c : Long.compare(a.logSeq(), b.logSeq());
+        });
+        return sorted;
+    }
 
     private void accumulateFunnel(Map<String, FunnelAggregate> agg, FunnelContribution c, int steps) {
         String key = c.bucket() + "\u0000" + c.dims();

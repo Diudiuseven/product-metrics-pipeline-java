@@ -1,7 +1,17 @@
 package com.github.diudiuseven.productmetricspipelinejava.compute;
 
+import com.github.diudiuseven.productmetricspipelinejava.config.PipelineProperties;
+import com.github.diudiuseven.productmetricspipelinejava.event.EventLog;
+import com.github.diudiuseven.productmetricspipelinejava.event.StoredEvent;
 import com.github.diudiuseven.productmetricspipelinejava.metric.MetricDefinition;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
+
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Full recompute: builds a scratch snapshot from the whole event log and
@@ -11,23 +21,74 @@ import org.springframework.stereotype.Service;
 @Service
 public class RecomputeService {
 
+    private static final Logger log = LoggerFactory.getLogger(RecomputeService.class);
+
     private final ReplayEngine engine;
     private final AggregateStore store;
+    private final EventLog eventLog;
+    private final PipelineProperties props;
+    private final Set<String> running = ConcurrentHashMap.newKeySet();
 
-    public RecomputeService(ReplayEngine engine, AggregateStore store) {
+    public RecomputeService(ReplayEngine engine, AggregateStore store, EventLog eventLog,
+                            PipelineProperties props) {
         this.engine = engine;
         this.store = store;
+        this.eventLog = eventLog;
+        this.props = props;
     }
 
     /** Recomputes the metric from scratch and returns the new commit id. */
     public long recompute(MetricDefinition def, String trigger) {
-        // TODO implement
-        return 0L;
+        String key = def.getId() + ":" + def.getVersion();
+        if (!running.add(key)) {
+            log.info("recompute already running for {}", key);
+            return 0L;
+        }
+        long taskId = 0L;
+        try {
+            long toSeq = eventLog.maxSeq();
+            BuilderCheckpoint cp = store.loadCheckpoint(def.getId(), def.getVersion()).orElse(null);
+            long fromSeq = cp == null ? 0L : cp.logSeq();
+            taskId = store.createRecomputeTask(def.getId(), def.getVersion(), fromSeq, toSeq);
+
+            List<StoredEvent> events = eventLog.findAllActiveOrdered();
+            if (events.size() > props.getRecomputeMaxEvents()) {
+                log.warn("recompute {}: active events {} exceed bound {}", key, events.size(),
+                        props.getRecomputeMaxEvents());
+            }
+            ReplayResult result = engine.replay(def, events);
+
+            // build scratch
+            for (Map.Entry<String, FunnelContribution> e : result.funnelUsers().entrySet()) {
+                store.writeFunnelScratch(taskId, e.getKey(), e.getValue());
+            }
+            for (Map.Entry<String, RetentionContribution> e : result.retentionUsers().entrySet()) {
+                store.writeRetentionScratch(taskId, e.getKey(), e.getValue());
+            }
+            for (FunnelAggregate a : result.funnel().values()) {
+                store.writeFunnelAggScratch(taskId, a);
+            }
+            for (RetentionAggregate a : result.retention().values()) {
+                store.writeRetentionAggScratch(taskId, a);
+            }
+
+            long commitId = store.publishRecompute(def, taskId, fromSeq, toSeq, events.size(),
+                    result, trigger);
+            log.info("recompute {}: published commit {} ({} events, {} users)", key, commitId,
+                    events.size(), result.funnelUsers().size() + result.retentionUsers().size());
+            return commitId;
+        } catch (RuntimeException e) {
+            if (taskId != 0L) {
+                store.finishRecomputeTask(taskId, RecomputeTaskStatus.FAILED, e.getMessage());
+                store.deleteScratch(taskId);
+            }
+            throw e;
+        } finally {
+            running.remove(key);
+        }
     }
 
-    /** True while a recompute task for the metric is running. */
     public boolean isRecomputing(String metricId, int version) {
-        // TODO implement
-        return false;
+        return running.contains(metricId + ":" + version);
     }
 }

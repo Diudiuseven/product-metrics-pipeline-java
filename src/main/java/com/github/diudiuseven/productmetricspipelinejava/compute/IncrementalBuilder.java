@@ -13,6 +13,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Incremental builder for one (metric, version). Re-evaluates affected users
@@ -88,6 +89,19 @@ public class IncrementalBuilder {
                     newRetentionUsers.put(userId, c);
                 }
             }
+        }
+
+        // 1b. cap dimension cardinality (safety fuse)
+        if (funnel) {
+            Set<String> existingDims = store.loadCurrentFunnel(def.getId(), def.getVersion()).keySet().stream()
+                    .map(k -> k.substring(k.indexOf('\u0000') + 1))
+                    .collect(java.util.stream.Collectors.toCollection(java.util.TreeSet::new));
+            newFunnelUsers = ReplayEngine.capFunnelDims(newFunnelUsers, existingDims, props.getMaxDimCombinations());
+        } else {
+            Set<String> existingDims = store.loadCurrentRetention(def.getId(), def.getVersion()).keySet().stream()
+                    .map(k -> k.substring(k.indexOf('\u0000') + 1))
+                    .collect(java.util.stream.Collectors.toCollection(java.util.TreeSet::new));
+            newRetentionUsers = ReplayEngine.capRetentionDims(newRetentionUsers, existingDims, props.getMaxDimCombinations());
         }
 
         // 2. load previous contributions for affected users

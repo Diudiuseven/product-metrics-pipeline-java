@@ -15,6 +15,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Deterministic per-user state machine. Every result is derived from the event
@@ -64,6 +65,24 @@ public class ReplayEngine {
             }
         }
         return new ReplayResult(funnelAgg, retentionAgg, funnelUsers, retentionUsers);
+    }
+
+    /** Re-aggregates funnel contributions into aggregates (used after dimension capping). */
+    public static Map<String, FunnelAggregate> aggregateFunnel(Map<String, FunnelContribution> users, int steps) {
+        Map<String, FunnelAggregate> agg = new LinkedHashMap<>();
+        for (FunnelContribution c : users.values()) {
+            accumulateFunnel(agg, c, steps);
+        }
+        return agg;
+    }
+
+    /** Re-aggregates retention contributions into aggregates (used after dimension capping). */
+    public static Map<String, RetentionAggregate> aggregateRetention(Map<String, RetentionContribution> users, int periods) {
+        Map<String, RetentionAggregate> agg = new LinkedHashMap<>();
+        for (RetentionContribution c : users.values()) {
+            accumulateRetention(agg, c, periods);
+        }
+        return agg;
     }
 
     public FunnelContribution evaluateFunnel(MetricDefinition def, List<StoredEvent> userEvents) {
@@ -216,7 +235,7 @@ public class ReplayEngine {
         return sorted;
     }
 
-    private void accumulateFunnel(Map<String, FunnelAggregate> agg, FunnelContribution c, int steps) {
+    private static void accumulateFunnel(Map<String, FunnelAggregate> agg, FunnelContribution c, int steps) {
         String key = c.bucket() + "\u0000" + c.dims();
         FunnelAggregate prev = agg.get(key);
         long[] stepCounts = prev == null ? new long[steps] : prev.stepCounts().clone();
@@ -234,7 +253,7 @@ public class ReplayEngine {
         agg.put(key, new FunnelAggregate(c.bucket(), c.dims(), entered, converted, skipped, missing, oow, pending, stepCounts));
     }
 
-    private void accumulateRetention(Map<String, RetentionAggregate> agg, RetentionContribution c, int periods) {
+    private static void accumulateRetention(Map<String, RetentionAggregate> agg, RetentionContribution c, int periods) {
         String key = c.cohort() + "\u0000" + c.dims();
         RetentionAggregate prev = agg.get(key);
         long[] retained = prev == null ? new long[periods] : prev.retained().clone();
@@ -296,4 +315,53 @@ public class ReplayEngine {
             case ENTERED -> 1;
         };
     }
+
+    public static final String OVERFLOW_DIMS = "__overflow__";
+
+    /**
+     * Caps the number of distinct dimension tuples. Existing tuples are always
+     * kept; new tuples beyond the bound are merged into {@value #OVERFLOW_DIMS}.
+     * New tuples are selected in deterministic (bucket, dims) order so the rule
+     * is identical for incremental and full-recompute paths.
+     */
+    public static Map<String, FunnelContribution> capFunnelDims(Map<String, FunnelContribution> users,
+                                                                Set<String> existingDims, int max) {
+        if (max <= 0 || users.isEmpty()) {
+            return users;
+        }
+        Set<String> keep = new java.util.TreeSet<>(existingDims);
+        List<String> newDims = users.values().stream().map(FunnelContribution::dims).distinct()
+                .filter(d -> !existingDims.contains(d)).sorted().toList();
+        for (String d : newDims) {
+            if (keep.size() >= max) {
+                break;
+            }
+            keep.add(d);
+        }
+        Map<String, FunnelContribution> result = new LinkedHashMap<>();
+        users.forEach((k, v) -> result.put(k, keep.contains(v.dims()) ? v
+                : new FunnelContribution(v.bucket(), OVERFLOW_DIMS, v.stepMask(), v.verdict())));
+        return result;
+    }
+
+    public static Map<String, RetentionContribution> capRetentionDims(Map<String, RetentionContribution> users,
+                                                                     Set<String> existingDims, int max) {
+        if (max <= 0 || users.isEmpty()) {
+            return users;
+        }
+        Set<String> keep = new java.util.TreeSet<>(existingDims);
+        List<String> newDims = users.values().stream().map(RetentionContribution::dims).distinct()
+                .filter(d -> !existingDims.contains(d)).sorted().toList();
+        for (String d : newDims) {
+            if (keep.size() >= max) {
+                break;
+            }
+            keep.add(d);
+        }
+        Map<String, RetentionContribution> result = new LinkedHashMap<>();
+        users.forEach((k, v) -> result.put(k, keep.contains(v.dims()) ? v
+                : new RetentionContribution(v.cohort(), OVERFLOW_DIMS, v.mask())));
+        return result;
+    }
+
 }

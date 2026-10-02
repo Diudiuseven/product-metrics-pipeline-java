@@ -58,6 +58,25 @@ public class RecomputeService {
             }
             ReplayResult result = engine.replay(def, events);
 
+            // cap dimension cardinality (safety fuse) and re-aggregate
+            if (def.getType() == com.github.diudiuseven.productmetricspipelinejava.metric.MetricType.FUNNEL) {
+                Map<String, FunnelContribution> cappedUsers = ReplayEngine.capFunnelDims(
+                        result.funnelUsers(), java.util.Set.of(), props.getMaxDimCombinations());
+                result = new ReplayResult(
+                        ReplayEngine.aggregateFunnel(cappedUsers, def.getFunnel().steps().size()),
+                        result.retention(),
+                        cappedUsers,
+                        result.retentionUsers());
+            } else {
+                Map<String, RetentionContribution> cappedUsers = ReplayEngine.capRetentionDims(
+                        result.retentionUsers(), java.util.Set.of(), props.getMaxDimCombinations());
+                result = new ReplayResult(
+                        result.funnel(),
+                        ReplayEngine.aggregateRetention(cappedUsers, def.getRetention().periods().size()),
+                        result.funnelUsers(),
+                        cappedUsers);
+            }
+
             // build scratch
             for (Map.Entry<String, FunnelContribution> e : result.funnelUsers().entrySet()) {
                 store.writeFunnelScratch(taskId, e.getKey(), e.getValue());

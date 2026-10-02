@@ -8,8 +8,6 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
-import java.util.Map;
-
 @RestController
 @RequestMapping("/api/metrics/{id}/funnel")
 public class FunnelQueryController {
@@ -26,7 +24,7 @@ public class FunnelQueryController {
             @RequestParam(required = false) Integer version,
             @RequestParam(required = false) String bucketFrom,
             @RequestParam(required = false) String bucketTo,
-            @RequestParam(required = false) Map<String, String> dimFilter,
+            @RequestParam(required = false) String dimFilter,
             @RequestParam(required = false) Integer pageSize,
             @RequestParam(required = false) String pageToken) {
         return queryService.query(metricId, version, bucketFrom, bucketTo, dimFilter, pageSize, pageToken);

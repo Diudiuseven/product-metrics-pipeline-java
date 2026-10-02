@@ -8,8 +8,6 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
-import java.util.Map;
-
 @RestController
 @RequestMapping("/api/metrics/{id}/retention")
 public class RetentionQueryController {
@@ -26,7 +24,7 @@ public class RetentionQueryController {
             @RequestParam(required = false) Integer version,
             @RequestParam(required = false) String cohortFrom,
             @RequestParam(required = false) String cohortTo,
-            @RequestParam(required = false) Map<String, String> dimFilter,
+            @RequestParam(required = false) String dimFilter,
             @RequestParam(required = false) Integer pageSize,
             @RequestParam(required = false) String pageToken) {
         return queryService.query(metricId, version, cohortFrom, cohortTo, dimFilter, pageSize, pageToken);

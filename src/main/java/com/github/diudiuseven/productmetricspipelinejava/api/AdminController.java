@@ -34,7 +34,6 @@ public class AdminController {
     @GetMapping("/commits/{id}")
     public List<AggregateStore.CommitRecord> commits(@PathVariable("id") String metricId,
                                                      @RequestParam(required = false) Integer version) {
-        // TODO implement
-        return List.of();
+        return store.listCommits(metricId, version == null ? 0 : version, 20);
     }
 }

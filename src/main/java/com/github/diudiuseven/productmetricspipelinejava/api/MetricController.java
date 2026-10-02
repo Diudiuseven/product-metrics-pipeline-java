@@ -33,8 +33,8 @@ public class MetricController {
     @GetMapping("/{id}")
     public MetricDefinition get(@PathVariable String id,
                                 @RequestParam(required = false) Integer version) {
-        // TODO implement
-        return null;
+        return (version == null ? registry.getLatest(id) : registry.get(id, version))
+                .orElseThrow(() -> new IllegalArgumentException("unknown metric: " + id));
     }
 
     @PostMapping

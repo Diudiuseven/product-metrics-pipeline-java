@@ -5,15 +5,16 @@
 -- ---------------- event log (source of truth, append-only) ----------------
 CREATE TABLE IF NOT EXISTS event_log (
     log_seq      BIGINT AUTO_INCREMENT PRIMARY KEY,
-    event_id     VARCHAR(128) NOT NULL UNIQUE,
+    event_id     VARCHAR(128) NOT NULL,
     user_id      VARCHAR(128) NOT NULL,
     event_type   VARCHAR(128) NOT NULL,
     event_time   TIMESTAMP NOT NULL,
     receive_time TIMESTAMP NOT NULL,
     dims         CLOB,
     op           VARCHAR(16) NOT NULL,           -- PUT / CORRECT / DELETE
-    payload_hash VARCHAR(64) NOT NULL,
-    prev_seq     BIGINT
+    payload_hash VARCHAR(128) NOT NULL,
+    prev_seq     BIGINT,
+    CONSTRAINT uq_event_id_hash UNIQUE (event_id, payload_hash)
 );
 CREATE INDEX IF NOT EXISTS idx_event_user_time ON event_log(user_id, event_time);
 CREATE INDEX IF NOT EXISTS idx_event_time ON event_log(event_time);

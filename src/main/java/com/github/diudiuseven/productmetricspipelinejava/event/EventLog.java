@@ -60,13 +60,18 @@ public class EventLog {
             // changed payload -> correction
             op = EventOp.CORRECT;
         }
+        // DELETE records get a unique sentinel hash so the (event_id, payload_hash)
+        // uniqueness never rejects a tombstone.
+        String storedHash = op == EventOp.DELETE
+                ? hash + ":DELETE:" + java.util.UUID.randomUUID()
+                : hash;
         try {
             jdbcTemplate.update(
                     "INSERT INTO event_log (event_id, user_id, event_type, event_time, receive_time, dims, op, payload_hash, prev_seq) "
                             + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     event.eventId(), event.userId(), event.eventType(),
                     Timestamp.from(event.eventTime()), Timestamp.from(event.receiveTime()),
-                    writeDims(event.dims()), op.name(), hash,
+                    writeDims(event.dims()), op.name(), storedHash,
                     existing == null ? null : existing.logSeq());
         } catch (DuplicateKeyException dup) {
             // concurrent append of the same event id: retry as idempotent no-op

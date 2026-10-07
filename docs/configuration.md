@@ -10,6 +10,9 @@
 | `pipeline.max-events-per-user` | `10000` | 单用户事件数安全熔断；超出则升级为全量重算。 |
 | `pipeline.max-dim-combinations` | `50000` | 单指标维度组数上界。 |
 | `pipeline.recompute-max-events` | `2000000` | 全量重算事件数告警阈值（超出仍重算，仅告警）。 |
+| `pipeline.consistency-max-events` | `100000` | 一致性比对（增量候选 vs 全量重放）参与的事件数上界；超出则本次比对记为 `SKIPPED_BOUNDS` 并跳过，以限制比对开销。 |
+| `pipeline.consistency-max-diffs` | `100` | 单份一致性报告最多记录的差异条目数（总数仍记录在 `totalDiffs`）。 |
+| `pipeline.consistency-interval` | `60s` | 空闲指标（无新事件）复核已提交快照的最小间隔。 |
 | `pipeline.thread-pool-size` | `4` | 指标构建器并行线程数（有界线程池，队列容量 256）。 |
 | `pipeline.query-timeout` | `5s` | 查询硬超时；超时返回 HTTP 504 且不输出任何行。 |
 | `pipeline.default-page-size` | `100` | 查询默认分页大小。 |

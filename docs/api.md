@@ -114,3 +114,11 @@
 ### GET /api/admin/commits/{id}?version={v}
 
 列出最近提交记录（含 `logSeqFrom/To`、`eventCount`、`trigger`、`status`），用于解释结果来源。
+
+### GET /api/admin/verification/{id}?version={v}&limit={n}
+
+列出最近的一致性比对报告。`status` 为可区分的失败原因：`VERIFIED` / `MISMATCH` / `SKIPPED_BOUNDS` / `HORIZON_UNDETERMINED`；`MISMATCH` 时 `diffs`（JSON）逐条给出具体用户（`user <id>`）与具体分组（`group <bucket␀dims>`）的 `expected/actual` 差异。
+
+### POST /api/admin/verify/{id}?version={v}
+
+对已提交快照触发一次即时一致性比对（异步），结果写入比对报告。

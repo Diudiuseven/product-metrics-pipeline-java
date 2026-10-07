@@ -40,14 +40,17 @@ public class ConsistencyVerifier {
     private final EventLog eventLog;
     private final PipelineProperties props;
     private final ObjectMapper objectMapper;
+    private final MetricBuildLocks buildLocks;
 
     public ConsistencyVerifier(ReplayEngine engine, AggregateStore store, EventLog eventLog,
-                               PipelineProperties props, ObjectMapper objectMapper) {
+                               PipelineProperties props, ObjectMapper objectMapper,
+                               MetricBuildLocks buildLocks) {
         this.engine = engine;
         this.store = store;
         this.eventLog = eventLog;
         this.props = props;
         this.objectMapper = objectMapper;
+        this.buildLocks = buildLocks;
     }
 
     /** True when a full-replay verification stays within the configured cost bound. */
@@ -137,6 +140,14 @@ public class ConsistencyVerifier {
      * checks. Does not modify the published snapshot.
      */
     public VerificationStatus verifyCommitted(MetricDefinition def) {
+        // serialized with builds of the same metric: the check reads several
+        // tables and must see one consistent committed generation
+        synchronized (buildLocks.of(def.getId(), def.getVersion())) {
+            return doVerifyCommitted(def);
+        }
+    }
+
+    private VerificationStatus doVerifyCommitted(MetricDefinition def) {
         long toSeq = store.loadCheckpoint(def.getId(), def.getVersion())
                 .map(BuilderCheckpoint::logSeq).orElse(0L);
         Outcome outcome;

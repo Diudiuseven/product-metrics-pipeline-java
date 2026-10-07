@@ -125,7 +125,9 @@ public class IncrementalBuilder {
                 : new LinkedHashMap<>(store.loadCurrentRetention(def.getId(), def.getVersion()));
 
         List<FunnelAggregate> funnelAggUpserts = new ArrayList<>();
+        List<FunnelAggregate> funnelAggDeletes = new ArrayList<>();
         List<RetentionAggregate> retentionAggUpserts = new ArrayList<>();
+        List<RetentionAggregate> retentionAggDeletes = new ArrayList<>();
         Map<String, FunnelContribution> funnelUserUpserts = new LinkedHashMap<>();
         Map<String, RetentionContribution> retentionUserUpserts = new LinkedHashMap<>();
 
@@ -146,9 +148,15 @@ public class IncrementalBuilder {
                     applyFunnelDelta(funnelAgg, newC, +1, def.getFunnel().steps().size());
                 }
             }
+            // groups whose last user left are pruned: a full replay never
+            // emits empty groups, so keeping them would diverge from it
             for (FunnelAggregate a : funnelAgg.values()) {
-                funnelAggUpserts.add(a);
+                if (a.entered() == 0) {
+                    funnelAggDeletes.add(a);
+                }
             }
+            funnelAgg.values().removeIf(a -> a.entered() == 0);
+            funnelAggUpserts.addAll(funnelAgg.values());
         } else {
             for (String userId : affectedUsers) {
                 RetentionContribution oldC = oldRetentionUsers.get(userId);
@@ -167,8 +175,12 @@ public class IncrementalBuilder {
                 }
             }
             for (RetentionAggregate a : retentionAgg.values()) {
-                retentionAggUpserts.add(a);
+                if (a.cohortSize() == 0) {
+                    retentionAggDeletes.add(a);
+                }
             }
+            retentionAgg.values().removeIf(a -> a.cohortSize() == 0);
+            retentionAggUpserts.addAll(retentionAgg.values());
         }
 
         // 3b. pre-publish consistency verification: the candidate snapshot
@@ -205,10 +217,12 @@ public class IncrementalBuilder {
 
         // 4. publish atomically
         long commitId = store.publishIncremental(def, fromSeq, toSeq, newEvents.size(),
-                funnelAggUpserts, retentionAggUpserts, funnelUserUpserts, retentionUserUpserts,
-                funnel ? deletedUsers : List.of(),
-                funnel ? List.of() : deletedUsers,
-                affectedUsers.size(), "INCREMENTAL");
+                affectedUsers.size(), "INCREMENTAL",
+                new AggregateStore.IncrementalPublish(
+                        funnelAggUpserts, retentionAggUpserts, funnelAggDeletes, retentionAggDeletes,
+                        funnelUserUpserts, retentionUserUpserts,
+                        funnel ? deletedUsers : List.of(),
+                        funnel ? List.of() : deletedUsers));
         store.saveVerificationReport(def.getId(), def.getVersion(), toSeq,
                 outcome.status(), outcome.diffsJson(), commitId);
         log.debug("metric {} v{}: incremental commit {} ({} -> {}, {} events, {} users)",

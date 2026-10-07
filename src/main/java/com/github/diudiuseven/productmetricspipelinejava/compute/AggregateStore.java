@@ -280,23 +280,42 @@ public class AggregateStore {
     // ---------------- publish ----------------
 
     /**
+     * Everything one incremental commit applies, in a single transaction.
+     * Groups whose counters all reached zero are deleted (a full replay never
+     * emits empty groups, so keeping them would diverge from it).
+     */
+    public record IncrementalPublish(
+            Collection<FunnelAggregate> funnelAggUpserts,
+            Collection<RetentionAggregate> retentionAggUpserts,
+            Collection<FunnelAggregate> funnelAggDeletes,
+            Collection<RetentionAggregate> retentionAggDeletes,
+            Map<String, FunnelContribution> funnelUserUpserts,
+            Map<String, RetentionContribution> retentionUserUpserts,
+            Collection<String> deletedFunnelUsers,
+            Collection<String> deletedRetentionUsers) {
+    }
+
+    /**
      * Publishes an incremental snapshot in one transaction: upserts the
-     * changed aggregate rows and per-user contributions, deletes tombstoned
-     * user rows, inserts the commit row and advances the checkpoint. Readers
-     * therefore only ever see a self-consistent committed whole.
+     * changed aggregate rows and per-user contributions, deletes emptied
+     * groups and tombstoned user rows, inserts the commit row and advances
+     * the checkpoint. Readers therefore only ever see a self-consistent
+     * committed whole.
      */
     @Transactional
     public long publishIncremental(MetricDefinition def, long fromSeq, long toSeq, long eventCount,
-                                   Collection<FunnelAggregate> funnelAggUpserts,
-                                   Collection<RetentionAggregate> retentionAggUpserts,
-                                   Map<String, FunnelContribution> funnelUserUpserts,
-                                   Map<String, RetentionContribution> retentionUserUpserts,
-                                   Collection<String> deletedFunnelUsers,
-                                   Collection<String> deletedRetentionUsers,
-                                   long affectedUsers, String trigger) {
+                                   long affectedUsers, String trigger, IncrementalPublish p) {
         long commitId = insertCommit(new CommitRecord(0, def.getId(), def.getVersion(), fromSeq, toSeq,
                 eventCount, affectedUsers, trigger, "COMMITTED", null, Instant.now()));
-        for (FunnelAggregate a : funnelAggUpserts) {
+        for (FunnelAggregate a : p.funnelAggDeletes()) {
+            jdbcTemplate.update("DELETE FROM funnel_agg WHERE metric_id = ? AND version = ? "
+                    + "AND bucket = ? AND dims = ?", def.getId(), def.getVersion(), a.bucket(), a.dims());
+        }
+        for (RetentionAggregate a : p.retentionAggDeletes()) {
+            jdbcTemplate.update("DELETE FROM retention_agg WHERE metric_id = ? AND version = ? "
+                    + "AND cohort = ? AND dims = ?", def.getId(), def.getVersion(), a.cohort(), a.dims());
+        }
+        for (FunnelAggregate a : p.funnelAggUpserts()) {
             jdbcTemplate.update(
                     "MERGE INTO funnel_agg (metric_id, version, bucket, dims, entered, converted, skipped, "
                             + "missing, out_of_window, pending, step_counts) KEY(metric_id, version, bucket, dims) "
@@ -304,7 +323,7 @@ public class AggregateStore {
                     def.getId(), def.getVersion(), a.bucket(), a.dims(), a.entered(), a.converted(),
                     a.skipped(), a.missing(), a.outOfWindow(), a.pending(), writeLongs(a.stepCounts()));
         }
-        for (Map.Entry<String, FunnelContribution> e : funnelUserUpserts.entrySet()) {
+        for (Map.Entry<String, FunnelContribution> e : p.funnelUserUpserts().entrySet()) {
             FunnelContribution c = e.getValue();
             jdbcTemplate.update(
                     "MERGE INTO funnel_user (metric_id, version, user_id, bucket, dims, step_mask, verdict) "
@@ -312,22 +331,22 @@ public class AggregateStore {
                     def.getId(), def.getVersion(), e.getKey(), c.bucket(), c.dims(), c.stepMask(),
                     c.verdict().name());
         }
-        for (RetentionAggregate a : retentionAggUpserts) {
+        for (RetentionAggregate a : p.retentionAggUpserts()) {
             jdbcTemplate.update(
                     "MERGE INTO retention_agg (metric_id, version, cohort, dims, cohort_size, retained) "
                             + "KEY(metric_id, version, cohort, dims) VALUES (?, ?, ?, ?, ?, ?)",
                     def.getId(), def.getVersion(), a.cohort(), a.dims(), a.cohortSize(),
                     writeLongs(a.retained()));
         }
-        for (Map.Entry<String, RetentionContribution> e : retentionUserUpserts.entrySet()) {
+        for (Map.Entry<String, RetentionContribution> e : p.retentionUserUpserts().entrySet()) {
             RetentionContribution c = e.getValue();
             jdbcTemplate.update(
                     "MERGE INTO retention_user (metric_id, version, user_id, cohort, dims, mask) "
                             + "KEY(metric_id, version, user_id) VALUES (?, ?, ?, ?, ?, ?)",
                     def.getId(), def.getVersion(), e.getKey(), c.cohort(), c.dims(), c.mask());
         }
-        deleteFunnelUsers(def.getId(), def.getVersion(), deletedFunnelUsers);
-        deleteRetentionUsers(def.getId(), def.getVersion(), deletedRetentionUsers);
+        deleteFunnelUsers(def.getId(), def.getVersion(), p.deletedFunnelUsers());
+        deleteRetentionUsers(def.getId(), def.getVersion(), p.deletedRetentionUsers());
         saveCheckpoint(new BuilderCheckpoint(def.getId(), def.getVersion(), toSeq, commitId, Instant.now()));
         return commitId;
     }

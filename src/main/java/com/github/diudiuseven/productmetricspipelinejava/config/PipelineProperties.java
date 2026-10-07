@@ -24,6 +24,13 @@ public class PipelineProperties {
     private int maxAffectedUsers = 2000;
     /** Safety fuse: events beyond this still recompute but with a warning. */
     private long recomputeMaxEvents = 2_000_000L;
+    /** Above this many active events, pre-publish consistency verification is
+     *  skipped (recorded as SKIPPED_BOUNDS) to bound verification cost. */
+    private long consistencyMaxEvents = 100_000L;
+    /** Max diff entries recorded in one verification report. */
+    private int consistencyMaxDiffs = 100;
+    /** Idle metrics are re-verified at most this often. */
+    private Duration consistencyInterval = Duration.ofSeconds(60);
     /** Worker threads for parallel metric builders. */
     private int threadPoolSize = 4;
     /** Hard query timeout; timed-out queries return no rows at all. */
@@ -46,6 +53,12 @@ public class PipelineProperties {
     public void setMaxAffectedUsers(int maxAffectedUsers) { this.maxAffectedUsers = maxAffectedUsers; }
     public long getRecomputeMaxEvents() { return recomputeMaxEvents; }
     public void setRecomputeMaxEvents(long recomputeMaxEvents) { this.recomputeMaxEvents = recomputeMaxEvents; }
+    public long getConsistencyMaxEvents() { return consistencyMaxEvents; }
+    public void setConsistencyMaxEvents(long consistencyMaxEvents) { this.consistencyMaxEvents = consistencyMaxEvents; }
+    public int getConsistencyMaxDiffs() { return consistencyMaxDiffs; }
+    public void setConsistencyMaxDiffs(int consistencyMaxDiffs) { this.consistencyMaxDiffs = consistencyMaxDiffs; }
+    public Duration getConsistencyInterval() { return consistencyInterval; }
+    public void setConsistencyInterval(Duration consistencyInterval) { this.consistencyInterval = consistencyInterval; }
     public int getThreadPoolSize() { return threadPoolSize; }
     public void setThreadPoolSize(int threadPoolSize) { this.threadPoolSize = threadPoolSize; }
     public Duration getQueryTimeout() { return queryTimeout; }

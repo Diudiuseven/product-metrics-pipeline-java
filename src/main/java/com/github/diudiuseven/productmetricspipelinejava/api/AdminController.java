@@ -36,4 +36,26 @@ public class AdminController {
                                                      @RequestParam(required = false) Integer version) {
         return store.listCommits(metricId, version == null ? 0 : version, 20);
     }
+
+    /**
+     * Recent consistency-check reports for a metric. The {@code status} field
+     * gives the distinguishable failure reason: VERIFIED / MISMATCH /
+     * SKIPPED_BOUNDS / HORIZON_UNDETERMINED; MISMATCH reports carry per-user
+     * and per-group diff detail in {@code diffs}.
+     */
+    @GetMapping("/verification/{id}")
+    public List<com.github.diudiuseven.productmetricspipelinejava.compute.VerificationReport> verification(
+            @PathVariable("id") String metricId,
+            @RequestParam(required = false) Integer version,
+            @RequestParam(required = false, defaultValue = "20") int limit) {
+        return store.listVerificationReports(metricId, version == null ? 0 : version, limit);
+    }
+
+    /** Triggers an on-demand consistency check against the committed snapshot. */
+    @PostMapping("/verify/{id}")
+    public Map<String, Object> verify(@PathVariable("id") String metricId,
+                                      @RequestParam(required = false) Integer version) {
+        scheduler.requestVerification(metricId, version);
+        return Map.of("status", "VERIFICATION_REQUESTED", "metricId", metricId);
+    }
 }

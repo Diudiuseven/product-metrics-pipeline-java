@@ -98,8 +98,7 @@ public class AggregateStore {
         Map<String, FunnelContribution> map = new LinkedHashMap<>();
         if (userIds.isEmpty()) {
             return map;
-        }
-        // H2 does not support array parameters; batch via IN with placeholders
+        }        // H2 does not support array parameters; batch via IN with placeholders
         List<String> ids = List.copyOf(userIds);
         int batch = 500;
         for (int i = 0; i < ids.size(); i += batch) {
@@ -138,6 +137,62 @@ public class AggregateStore {
                     }, buildArgs(metricId, version, part));
         }
         return map;
+    }
+
+    /** All committed per-user funnel contributions (verification only; callers
+     *  must bound input size via pipeline.consistency-max-events first). */
+    public Map<String, FunnelContribution> loadAllFunnelUsers(String metricId, int version) {
+        Map<String, FunnelContribution> map = new LinkedHashMap<>();
+        jdbcTemplate.query("SELECT * FROM funnel_user WHERE metric_id = ? AND version = ?",
+                (RowMapper<Void>) (rs, n) -> {
+                    map.put(rs.getString("user_id"), new FunnelContribution(
+                            rs.getString("bucket"), rs.getString("dims"), rs.getInt("step_mask"),
+                            FunnelVerdict.valueOf(rs.getString("verdict"))));
+                    return null;
+                }, metricId, version);
+        return map;
+    }
+
+    /** All committed per-user retention contributions (verification only). */
+    public Map<String, RetentionContribution> loadAllRetentionUsers(String metricId, int version) {
+        Map<String, RetentionContribution> map = new LinkedHashMap<>();
+        jdbcTemplate.query("SELECT * FROM retention_user WHERE metric_id = ? AND version = ?",
+                (RowMapper<Void>) (rs, n) -> {
+                    map.put(rs.getString("user_id"), new RetentionContribution(
+                            rs.getString("cohort"), rs.getString("dims"), rs.getInt("mask")));
+                    return null;
+                }, metricId, version);
+        return map;
+    }
+
+    // ---------------- consistency verification reports ----------------
+
+    public long saveVerificationReport(String metricId, int version, long logSeq,
+                                       VerificationStatus status, String diffs, Long commitId) {
+        jdbcTemplate.update(
+                "INSERT INTO verification_report (metric_id, version, checked_at, log_seq, status, diffs, commit_id) "
+                        + "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                metricId, version, Timestamp.from(Instant.now()), logSeq, status.name(), diffs, commitId);
+        Long id = jdbcTemplate.queryForObject("SELECT MAX(report_id) FROM verification_report", Long.class);
+        return id == null ? 0L : id;
+    }
+
+    public List<VerificationReport> listVerificationReports(String metricId, int version, int limit) {
+        String sql = "SELECT * FROM verification_report WHERE metric_id = ? "
+                + (version > 0 ? "AND version = ? " : "")
+                + "ORDER BY report_id DESC LIMIT ?";
+        Object[] args = version > 0 ? new Object[]{metricId, version, limit} : new Object[]{metricId, limit};
+        return jdbcTemplate.query(sql, (rs, n) -> new VerificationReport(
+                rs.getLong("report_id"), rs.getString("metric_id"), rs.getInt("version"),
+                rs.getTimestamp("checked_at").toInstant(), rs.getLong("log_seq"),
+                VerificationStatus.valueOf(rs.getString("status")),
+                rs.getString("diffs"),
+                rs.getObject("commit_id") == null ? null : rs.getLong("commit_id")), args);
+    }
+
+    /** Latest verification status per metric, for health surfacing. */
+    public Optional<VerificationReport> latestVerification(String metricId, int version) {
+        return listVerificationReports(metricId, version, 1).stream().findFirst();
     }
 
     public void deleteFunnelUsers(String metricId, int version, Collection<String> userIds) {
@@ -226,8 +281,9 @@ public class AggregateStore {
 
     /**
      * Publishes an incremental snapshot in one transaction: upserts the
-     * changed aggregate rows and per-user contributions, inserts the commit
-     * row and advances the checkpoint.
+     * changed aggregate rows and per-user contributions, deletes tombstoned
+     * user rows, inserts the commit row and advances the checkpoint. Readers
+     * therefore only ever see a self-consistent committed whole.
      */
     @Transactional
     public long publishIncremental(MetricDefinition def, long fromSeq, long toSeq, long eventCount,
@@ -235,6 +291,8 @@ public class AggregateStore {
                                    Collection<RetentionAggregate> retentionAggUpserts,
                                    Map<String, FunnelContribution> funnelUserUpserts,
                                    Map<String, RetentionContribution> retentionUserUpserts,
+                                   Collection<String> deletedFunnelUsers,
+                                   Collection<String> deletedRetentionUsers,
                                    long affectedUsers, String trigger) {
         long commitId = insertCommit(new CommitRecord(0, def.getId(), def.getVersion(), fromSeq, toSeq,
                 eventCount, affectedUsers, trigger, "COMMITTED", null, Instant.now()));
@@ -268,6 +326,8 @@ public class AggregateStore {
                             + "KEY(metric_id, version, user_id) VALUES (?, ?, ?, ?, ?, ?)",
                     def.getId(), def.getVersion(), e.getKey(), c.cohort(), c.dims(), c.mask());
         }
+        deleteFunnelUsers(def.getId(), def.getVersion(), deletedFunnelUsers);
+        deleteRetentionUsers(def.getId(), def.getVersion(), deletedRetentionUsers);
         saveCheckpoint(new BuilderCheckpoint(def.getId(), def.getVersion(), toSeq, commitId, Instant.now()));
         return commitId;
     }

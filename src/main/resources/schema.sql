@@ -107,6 +107,22 @@ CREATE TABLE IF NOT EXISTS builder_checkpoint (
     PRIMARY KEY (metric_id, version)
 );
 
+-- ---------------- consistency verification reports ----------------
+-- Every incremental publish is verified against a full replay of the same
+-- committed input prefix before it goes out; failures are recorded here with
+-- per-user / per-group diffs and the new result is NOT published.
+CREATE TABLE IF NOT EXISTS verification_report (
+    report_id  BIGINT AUTO_INCREMENT PRIMARY KEY,
+    metric_id  VARCHAR(64) NOT NULL,
+    version    INT NOT NULL,
+    checked_at TIMESTAMP NOT NULL,
+    log_seq    BIGINT NOT NULL,
+    status     VARCHAR(24) NOT NULL,  -- VERIFIED / MISMATCH / SKIPPED_BOUNDS / HORIZON_UNDETERMINED
+    diffs      CLOB,                  -- JSON: bounded per-user and per-group diff detail
+    commit_id  BIGINT                 -- the commit this check guarded (NULL when rejected)
+);
+CREATE INDEX IF NOT EXISTS idx_verification_metric ON verification_report(metric_id, version, report_id);
+
 -- ---------------- recompute tasks (scratch builds; recoverable) ----------------
 CREATE TABLE IF NOT EXISTS recompute_task (
     task_id      BIGINT AUTO_INCREMENT PRIMARY KEY,

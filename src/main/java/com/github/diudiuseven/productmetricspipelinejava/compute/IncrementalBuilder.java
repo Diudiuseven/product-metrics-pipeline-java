@@ -29,18 +29,22 @@ public class IncrementalBuilder {
     private final AggregateStore store;
     private final EventLog eventLog;
     private final PipelineProperties props;
+    private final ConsistencyVerifier verifier;
 
     public IncrementalBuilder(ReplayEngine engine, AggregateStore store, EventLog eventLog,
-                              PipelineProperties props) {
+                              PipelineProperties props, ConsistencyVerifier verifier) {
         this.engine = engine;
         this.store = store;
         this.eventLog = eventLog;
         this.props = props;
+        this.verifier = verifier;
     }
 
     /**
      * Runs one incremental tick for the metric. No-op if nothing new arrived.
-     * Returns the new commit id, or 0 if no commit was produced.
+     * Returns the new commit id, 0 if no commit was produced, -1 if a bound
+     * was exceeded and -2 if the pre-publish consistency check rejected the
+     * candidate (both negative codes ask the caller to escalate to recompute).
      */
     public long runIncremental(MetricDefinition def) {
         BuilderCheckpoint cp = store.loadCheckpoint(def.getId(), def.getVersion())
@@ -167,17 +171,46 @@ public class IncrementalBuilder {
             }
         }
 
+        // 3b. pre-publish consistency verification: the candidate snapshot
+        // must be row-identical to a full replay of the same committed input
+        // prefix (log_seq <= toSeq). On mismatch the candidate is NOT
+        // published; the caller escalates to an authoritative recompute.
+        long activeAtSeq = eventLog.countActiveUpTo(toSeq);
+        ConsistencyVerifier.Outcome outcome;
+        if (verifier.isWithinBounds(activeAtSeq)) {
+            if (funnel) {
+                Map<String, FunnelContribution> candidateUsers =
+                        new LinkedHashMap<>(store.loadAllFunnelUsers(def.getId(), def.getVersion()));
+                candidateUsers.putAll(funnelUserUpserts);
+                deletedUsers.forEach(candidateUsers::remove);
+                outcome = verifier.verifyFunnel(def, toSeq, candidateUsers, funnelAgg);
+            } else {
+                Map<String, RetentionContribution> candidateUsers =
+                        new LinkedHashMap<>(store.loadAllRetentionUsers(def.getId(), def.getVersion()));
+                candidateUsers.putAll(retentionUserUpserts);
+                deletedUsers.forEach(candidateUsers::remove);
+                outcome = verifier.verifyRetention(def, toSeq, candidateUsers, retentionAgg);
+            }
+        } else {
+            outcome = verifier.skippedBounds(activeAtSeq);
+        }
+        if (outcome.status() == VerificationStatus.MISMATCH
+                || outcome.status() == VerificationStatus.HORIZON_UNDETERMINED) {
+            store.saveVerificationReport(def.getId(), def.getVersion(), toSeq,
+                    outcome.status(), outcome.diffsJson(), null);
+            log.warn("metric {} v{}: consistency check {} at seq {}; candidate NOT published. {}",
+                    def.getId(), def.getVersion(), outcome.status(), toSeq, outcome.diffsJson());
+            return -2L;
+        }
+
         // 4. publish atomically
         long commitId = store.publishIncremental(def, fromSeq, toSeq, newEvents.size(),
                 funnelAggUpserts, retentionAggUpserts, funnelUserUpserts, retentionUserUpserts,
+                funnel ? deletedUsers : List.of(),
+                funnel ? List.of() : deletedUsers,
                 affectedUsers.size(), "INCREMENTAL");
-        if (!deletedUsers.isEmpty()) {
-            if (funnel) {
-                store.deleteFunnelUsers(def.getId(), def.getVersion(), deletedUsers);
-            } else {
-                store.deleteRetentionUsers(def.getId(), def.getVersion(), deletedUsers);
-            }
-        }
+        store.saveVerificationReport(def.getId(), def.getVersion(), toSeq,
+                outcome.status(), outcome.diffsJson(), commitId);
         log.debug("metric {} v{}: incremental commit {} ({} -> {}, {} events, {} users)",
                 def.getId(), def.getVersion(), commitId, fromSeq, toSeq, newEvents.size(),
                 affectedUsers.size());

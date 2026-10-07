@@ -79,6 +79,24 @@ public class AggregateStore {
         return map;
     }
 
+    /**
+     * Distinct dimension tuples currently committed for a metric. This is the
+     * shared "existing groups" input of the dimension-cap rule: both the
+     * incremental builder and the full recompute must cap against exactly this
+     * set so already-stable groups are never rewritten.
+     */
+    public java.util.Set<String> loadCurrentFunnelDims(String metricId, int version) {
+        return new java.util.TreeSet<>(jdbcTemplate.queryForList(
+                "SELECT DISTINCT dims FROM funnel_agg WHERE metric_id = ? AND version = ?",
+                String.class, metricId, version));
+    }
+
+    public java.util.Set<String> loadCurrentRetentionDims(String metricId, int version) {
+        return new java.util.TreeSet<>(jdbcTemplate.queryForList(
+                "SELECT DISTINCT dims FROM retention_agg WHERE metric_id = ? AND version = ?",
+                String.class, metricId, version));
+    }
+
     public Map<String, FunnelContribution> loadFunnelUsers(String metricId, int version,
                                                             Collection<String> userIds) {
         Map<String, FunnelContribution> map = new LinkedHashMap<>();
@@ -225,6 +243,14 @@ public class AggregateStore {
         long commitId = insertCommit(new CommitRecord(0, def.getId(), def.getVersion(), fromSeq, toSeq,
                 eventCount, affectedUsers, trigger, "COMMITTED", null, Instant.now()));
         for (FunnelAggregate a : funnelAggUpserts) {
+            if (isZero(a)) {
+                // all-zero rows carry no users: delete them so the committed
+                // snapshot stays row-identical to a from-scratch recompute
+                jdbcTemplate.update(
+                        "DELETE FROM funnel_agg WHERE metric_id = ? AND version = ? AND bucket = ? AND dims = ?",
+                        def.getId(), def.getVersion(), a.bucket(), a.dims());
+                continue;
+            }
             jdbcTemplate.update(
                     "MERGE INTO funnel_agg (metric_id, version, bucket, dims, entered, converted, skipped, "
                             + "missing, out_of_window, pending, step_counts) KEY(metric_id, version, bucket, dims) "
@@ -241,6 +267,12 @@ public class AggregateStore {
                     c.verdict().name());
         }
         for (RetentionAggregate a : retentionAggUpserts) {
+            if (isZero(a)) {
+                jdbcTemplate.update(
+                        "DELETE FROM retention_agg WHERE metric_id = ? AND version = ? AND cohort = ? AND dims = ?",
+                        def.getId(), def.getVersion(), a.cohort(), a.dims());
+                continue;
+            }
             jdbcTemplate.update(
                     "MERGE INTO retention_agg (metric_id, version, cohort, dims, cohort_size, retained) "
                             + "KEY(metric_id, version, cohort, dims) VALUES (?, ?, ?, ?, ?, ?)",
@@ -333,6 +365,106 @@ public class AggregateStore {
                 taskId, a.cohort(), a.dims(), a.cohortSize(), writeLongs(a.retained()));
     }
 
+    // ---------------- consistency reports & publish gate ----------------
+
+    public long insertReport(com.github.diudiuseven.productmetricspipelinejava.verify.ConsistencyReport r) {
+        jdbcTemplate.update(
+                "INSERT INTO consistency_report (metric_id, version, commit_id, log_seq, status, reason, "
+                        + "diff_count, diff_detail, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                r.metricId(), r.version(), r.commitId(), r.logSeq(), r.status().name(),
+                r.reason() == null ? null : r.reason().name(), r.diffCount(), r.diffDetail(),
+                Timestamp.from(r.createdAt()));
+        Long id = jdbcTemplate.queryForObject("SELECT MAX(report_id) FROM consistency_report", Long.class);
+        return id == null ? 0L : id;
+    }
+
+    public Optional<com.github.diudiuseven.productmetricspipelinejava.verify.ConsistencyReport>
+            latestReport(String metricId, int version) {
+        List<com.github.diudiuseven.productmetricspipelinejava.verify.ConsistencyReport> list =
+                jdbcTemplate.query(
+                        "SELECT * FROM consistency_report WHERE metric_id = ? AND version = ? "
+                                + "ORDER BY report_id DESC LIMIT 1",
+                        reportMapper(), metricId, version);
+        return list.stream().findFirst();
+    }
+
+    public List<com.github.diudiuseven.productmetricspipelinejava.verify.ConsistencyReport>
+            listReports(String metricId, int version, int limit) {
+        return jdbcTemplate.query(
+                "SELECT * FROM consistency_report WHERE metric_id = ? AND version = ? "
+                        + "ORDER BY report_id DESC LIMIT ?",
+                reportMapper(), metricId, version, limit);
+    }
+
+    private RowMapper<com.github.diudiuseven.productmetricspipelinejava.verify.ConsistencyReport> reportMapper() {
+        return (rs, n) -> new com.github.diudiuseven.productmetricspipelinejava.verify.ConsistencyReport(
+                rs.getLong("report_id"), rs.getString("metric_id"), rs.getInt("version"),
+                rs.getLong("commit_id"), rs.getLong("log_seq"),
+                com.github.diudiuseven.productmetricspipelinejava.verify.VerificationStatus
+                        .valueOf(rs.getString("status")),
+                rs.getString("reason") == null ? null
+                        : com.github.diudiuseven.productmetricspipelinejava.verify.ConsistencyFailureReason
+                                .valueOf(rs.getString("reason")),
+                rs.getLong("diff_count"), rs.getString("diff_detail"),
+                rs.getTimestamp("created_at").toInstant());
+    }
+
+    public Optional<com.github.diudiuseven.productmetricspipelinejava.verify.MetricGate>
+            loadGate(String metricId, int version) {
+        List<com.github.diudiuseven.productmetricspipelinejava.verify.MetricGate> list = jdbcTemplate.query(
+                "SELECT * FROM metric_gate WHERE metric_id = ? AND version = ?",
+                gateMapper(), metricId, version);
+        return list.stream().findFirst();
+    }
+
+    /** All metrics whose publish gate is BLOCKED (used by startup recovery). */
+    public List<com.github.diudiuseven.productmetricspipelinejava.verify.MetricGate> findBlockedGates() {
+        return jdbcTemplate.query("SELECT * FROM metric_gate WHERE status = 'BLOCKED'", gateMapper());
+    }
+
+    private RowMapper<com.github.diudiuseven.productmetricspipelinejava.verify.MetricGate> gateMapper() {
+        return (rs, n) -> new com.github.diudiuseven.productmetricspipelinejava.verify.MetricGate(
+                rs.getString("metric_id"), rs.getInt("version"),
+                "BLOCKED".equals(rs.getString("status")),
+                rs.getString("reason") == null ? null
+                        : com.github.diudiuseven.productmetricspipelinejava.verify.ConsistencyFailureReason
+                                .valueOf(rs.getString("reason")),
+                rs.getTimestamp("updated_at").toInstant());
+    }
+
+    public void saveGate(com.github.diudiuseven.productmetricspipelinejava.verify.MetricGate gate) {
+        jdbcTemplate.update(
+                "MERGE INTO metric_gate (metric_id, version, status, reason, updated_at) "
+                        + "KEY(metric_id, version) VALUES (?, ?, ?, ?, ?)",
+                gate.metricId(), gate.version(), gate.blocked() ? "BLOCKED" : "OPEN",
+                gate.reason() == null ? null : gate.reason().name(), Timestamp.from(gate.updatedAt()));
+    }
+
+    /** All committed per-user funnel contributions (full snapshot). */
+    public Map<String, FunnelContribution> loadAllFunnelUsers(String metricId, int version) {
+        Map<String, FunnelContribution> map = new LinkedHashMap<>();
+        jdbcTemplate.query("SELECT * FROM funnel_user WHERE metric_id = ? AND version = ?",
+                (RowMapper<Void>) (rs, n) -> {
+                    map.put(rs.getString("user_id"), new FunnelContribution(
+                            rs.getString("bucket"), rs.getString("dims"), rs.getInt("step_mask"),
+                            FunnelVerdict.valueOf(rs.getString("verdict"))));
+                    return null;
+                }, metricId, version);
+        return map;
+    }
+
+    /** All committed per-user retention contributions (full snapshot). */
+    public Map<String, RetentionContribution> loadAllRetentionUsers(String metricId, int version) {
+        Map<String, RetentionContribution> map = new LinkedHashMap<>();
+        jdbcTemplate.query("SELECT * FROM retention_user WHERE metric_id = ? AND version = ?",
+                (RowMapper<Void>) (rs, n) -> {
+                    map.put(rs.getString("user_id"), new RetentionContribution(
+                            rs.getString("cohort"), rs.getString("dims"), rs.getInt("mask")));
+                    return null;
+                }, metricId, version);
+        return map;
+    }
+
     // ---------------- mappers / helpers ----------------
 
     private FunnelAggregate mapFunnelAgg(java.sql.ResultSet rs) throws java.sql.SQLException {
@@ -355,6 +487,31 @@ public class AggregateStore {
             args[i + 2] = part.get(i);
         }
         return args;
+    }
+
+    private static boolean isZero(FunnelAggregate a) {
+        if (a.entered() != 0 || a.converted() != 0 || a.skipped() != 0 || a.missing() != 0
+                || a.outOfWindow() != 0 || a.pending() != 0) {
+            return false;
+        }
+        for (long v : a.stepCounts()) {
+            if (v != 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean isZero(RetentionAggregate a) {
+        if (a.cohortSize() != 0) {
+            return false;
+        }
+        for (long v : a.retained()) {
+            if (v != 0) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private String writeLongs(long[] values) {

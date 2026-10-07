@@ -159,3 +159,28 @@ CREATE TABLE IF NOT EXISTS retention_user_scratch (
     mask    INT NOT NULL,
     PRIMARY KEY (task_id, user_id)
 );
+
+-- ---------------- consistency verification (continuous replay-vs-published comparison) ----------------
+CREATE TABLE IF NOT EXISTS consistency_report (
+    report_id  BIGINT AUTO_INCREMENT PRIMARY KEY,
+    metric_id  VARCHAR(64) NOT NULL,
+    version    INT NOT NULL,
+    commit_id  BIGINT NOT NULL,
+    log_seq    BIGINT NOT NULL,
+    status     VARCHAR(32) NOT NULL,          -- VERIFIED / MISMATCH / SKIPPED_BOUNDS / NO_COMMITTED_SNAPSHOT
+    reason     VARCHAR(64),                   -- CONSISTENCY_MISMATCH / DECISION_BASIS_UNDETERMINED / BOUNDS_EXCEEDED
+    diff_count BIGINT NOT NULL DEFAULT 0,
+    diff_detail CLOB,                          -- JSON array, bounded by pipeline.verification-max-diffs
+    created_at TIMESTAMP NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_report_metric ON consistency_report(metric_id, version, report_id);
+
+-- ---------------- publish gate (blocks new publishes while a mismatch is unresolved) ----------------
+CREATE TABLE IF NOT EXISTS metric_gate (
+    metric_id  VARCHAR(64) NOT NULL,
+    version    INT NOT NULL,
+    status     VARCHAR(16) NOT NULL,          -- OPEN / BLOCKED
+    reason     VARCHAR(64),
+    updated_at TIMESTAMP NOT NULL,
+    PRIMARY KEY (metric_id, version)
+);

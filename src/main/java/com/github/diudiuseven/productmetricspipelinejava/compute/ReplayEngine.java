@@ -173,7 +173,12 @@ public class ReplayEngine {
             }
         }
         if (curStep > 0 && attemptVerdict == null) {
-            attemptVerdict = Instant.now().isAfter(start.plus(window))
+            // Decision basis: the max event time among THIS user's committed
+            // events — never the wall clock. The verdict is a pure function of
+            // the committed input: it cannot drift while no new event arrives,
+            // and incremental evaluation and full replay always agree.
+            Instant basis = decisionBasis(sorted);
+            attemptVerdict = basis.isAfter(start.plus(window))
                     ? FunnelVerdict.MISSING : FunnelVerdict.PENDING;
             bestMask |= attemptMask;
             if (verdictRank(attemptVerdict) > verdictRank(bestVerdict)) {
@@ -225,6 +230,18 @@ public class ReplayEngine {
     }
 
     // --------------------------- helpers ---------------------------
+
+    /**
+     * Deterministic decision basis for open funnel windows: the latest event
+     * time committed for this user. Pure function of the committed input —
+     * identical for incremental evaluation and full replay, stable over time.
+     */
+    public static Instant decisionBasis(List<StoredEvent> userEventsSortedByTime) {
+        if (userEventsSortedByTime.isEmpty()) {
+            return Instant.EPOCH;
+        }
+        return userEventsSortedByTime.get(userEventsSortedByTime.size() - 1).event().eventTime();
+    }
 
     private static List<StoredEvent> sortedByTime(List<StoredEvent> events) {
         List<StoredEvent> sorted = new ArrayList<>(events);
@@ -361,6 +378,91 @@ public class ReplayEngine {
         Map<String, RetentionContribution> result = new LinkedHashMap<>();
         users.forEach((k, v) -> result.put(k, keep.contains(v.dims()) ? v
                 : new RetentionContribution(v.cohort(), OVERFLOW_DIMS, v.mask())));
+        return result;
+    }
+
+    /**
+     * Sticky dimension capping for full-recompute and verification paths.
+     *
+     * <p>A user's group assignment is decided when the user's contribution is
+     * first committed and never rewritten afterwards:
+     * <ul>
+     *   <li>committed {@value #OVERFLOW_DIMS} → stays overflow (capacity freeing
+     *       up later never silently promotes a committed user);</li>
+     *   <li>committed detailed dims equal to the replayed raw dims → kept;</li>
+     *   <li>otherwise (new user, or the user's raw dims changed because their
+     *       events were corrected) → capped fresh against the currently
+     *       committed dims, admitting new tuples in sorted order while slots
+     *       remain.</li>
+     * </ul>
+     * This is exactly what the incremental path produces, so a full recompute
+     * of the same committed input selects the same groups and never rewrites
+     * stable ones.
+     */
+    public static Map<String, FunnelContribution> capFunnelDimsSticky(
+            Map<String, FunnelContribution> replayedUsers,
+            Map<String, FunnelContribution> committedUsers,
+            Set<String> existingDims, int max) {
+        if (max <= 0 || replayedUsers.isEmpty()) {
+            return replayedUsers;
+        }
+        Set<String> keep = new java.util.TreeSet<>(existingDims);
+        Map<String, FunnelContribution> result = new LinkedHashMap<>();
+        Map<String, FunnelContribution> fresh = new LinkedHashMap<>();
+        replayedUsers.forEach((userId, c) -> {
+            FunnelContribution committed = committedUsers.get(userId);
+            if (committed != null && OVERFLOW_DIMS.equals(committed.dims())) {
+                result.put(userId, new FunnelContribution(c.bucket(), OVERFLOW_DIMS, c.stepMask(), c.verdict()));
+            } else if (committed != null && committed.dims().equals(c.dims())) {
+                result.put(userId, c);
+            } else {
+                fresh.put(userId, c);
+            }
+        });
+        List<String> newDims = fresh.values().stream().map(FunnelContribution::dims).distinct()
+                .filter(d -> !keep.contains(d)).sorted().toList();
+        for (String d : newDims) {
+            if (keep.size() >= max) {
+                break;
+            }
+            keep.add(d);
+        }
+        fresh.forEach((userId, c) -> result.put(userId, keep.contains(c.dims()) ? c
+                : new FunnelContribution(c.bucket(), OVERFLOW_DIMS, c.stepMask(), c.verdict())));
+        return result;
+    }
+
+    /** Sticky variant of {@link #capRetentionDims}; see {@link #capFunnelDimsSticky}. */
+    public static Map<String, RetentionContribution> capRetentionDimsSticky(
+            Map<String, RetentionContribution> replayedUsers,
+            Map<String, RetentionContribution> committedUsers,
+            Set<String> existingDims, int max) {
+        if (max <= 0 || replayedUsers.isEmpty()) {
+            return replayedUsers;
+        }
+        Set<String> keep = new java.util.TreeSet<>(existingDims);
+        Map<String, RetentionContribution> result = new LinkedHashMap<>();
+        Map<String, RetentionContribution> fresh = new LinkedHashMap<>();
+        replayedUsers.forEach((userId, c) -> {
+            RetentionContribution committed = committedUsers.get(userId);
+            if (committed != null && OVERFLOW_DIMS.equals(committed.dims())) {
+                result.put(userId, new RetentionContribution(c.cohort(), OVERFLOW_DIMS, c.mask()));
+            } else if (committed != null && committed.dims().equals(c.dims())) {
+                result.put(userId, c);
+            } else {
+                fresh.put(userId, c);
+            }
+        });
+        List<String> newDims = fresh.values().stream().map(RetentionContribution::dims).distinct()
+                .filter(d -> !keep.contains(d)).sorted().toList();
+        for (String d : newDims) {
+            if (keep.size() >= max) {
+                break;
+            }
+            keep.add(d);
+        }
+        fresh.forEach((userId, c) -> result.put(userId, keep.contains(c.dims()) ? c
+                : new RetentionContribution(c.cohort(), OVERFLOW_DIMS, c.mask())));
         return result;
     }
 

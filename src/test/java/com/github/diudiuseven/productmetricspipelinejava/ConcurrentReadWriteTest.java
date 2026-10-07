@@ -43,6 +43,7 @@ class ConcurrentReadWriteTest {
     @Autowired FunnelQueryService funnelQuery;
     @Autowired JdbcTemplate jdbc;
     @Autowired com.github.diudiuseven.productmetricspipelinejava.metric.DefinitionRegistry registry;
+    @Autowired org.springframework.context.ApplicationContext appContext;
 
     private final Instant t0 = Instant.parse("2026-10-01T00:00:00Z");
     private MetricDefinition def;
@@ -58,6 +59,8 @@ class ConcurrentReadWriteTest {
         jdbc.execute("DELETE FROM recompute_task");
         jdbc.execute("DELETE FROM funnel_agg_scratch");
         jdbc.execute("DELETE FROM funnel_user_scratch");
+        jdbc.execute("DELETE FROM consistency_report");
+        jdbc.execute("DELETE FROM metric_gate");
 
         def = new MetricDefinition();
         def.setId("concurrent_funnel");
@@ -145,5 +148,101 @@ class ConcurrentReadWriteTest {
         // total users = writers * eventsPerWriter
         long totalEntered = stored.values().iterator().next().entered();
         assertEquals((long) writers * eventsPerWriter, totalEntered);
+    }
+
+    @Test
+    void queriesDuringRecomputeAndVerificationSeeConsistentSnapshots() throws Exception {
+        // seed
+        for (int i = 0; i < 20; i++) {
+            ingest.ingest(new Event("seed" + i, "su" + i, "page_view", t0, t0, Map.of(), null));
+        }
+        builder.runIncremental(def);
+
+        com.github.diudiuseven.productmetricspipelinejava.compute.RecomputeService recompute =
+                appContext.getBean(
+                        com.github.diudiuseven.productmetricspipelinejava.compute.RecomputeService.class);
+        com.github.diudiuseven.productmetricspipelinejava.verify.ConsistencyVerifier verifier =
+                appContext.getBean(
+                        com.github.diudiuseven.productmetricspipelinejava.verify.ConsistencyVerifier.class);
+
+        ExecutorService pool = Executors.newFixedThreadPool(5);
+        CountDownLatch start = new CountDownLatch(1);
+        AtomicInteger errors = new AtomicInteger();
+        List<Future<?>> futures = new ArrayList<>();
+
+        // writer: ingest + incremental build + verify, interleaved
+        futures.add(pool.submit(() -> {
+            try {
+                start.await();
+                for (int i = 0; i < 60; i++) {
+                    ingest.ingest(new Event("inc" + i, "iu" + (i % 15), "page_view",
+                            t0.plus(Duration.ofMinutes(i)), t0, Map.of(), null));
+                    if (i % 3 == 0) {
+                        ingest.ingest(new Event("incp" + i, "iu" + (i % 15), "purchase",
+                                t0.plus(Duration.ofMinutes(i)).plus(Duration.ofMinutes(5)), t0,
+                                Map.of(), null));
+                    }
+                    builder.runIncremental(def);
+                    verifier.verifyNow(def); // null when a concurrent publish raced: fine
+                }
+            } catch (Exception e) {
+                errors.incrementAndGet();
+                e.printStackTrace();
+            }
+        }));
+
+        // recompute thread: full recomputes racing the incremental builds
+        futures.add(pool.submit(() -> {
+            try {
+                start.await();
+                for (int i = 0; i < 8; i++) {
+                    recompute.recompute(def, "MANUAL");
+                    Thread.sleep(20);
+                }
+            } catch (Exception e) {
+                errors.incrementAndGet();
+                e.printStackTrace();
+            }
+        }));
+
+        // readers: every observed row must be a self-consistent committed whole
+        for (int r = 0; r < 3; r++) {
+            futures.add(pool.submit(() -> {
+                try {
+                    start.await();
+                    for (int i = 0; i < 120; i++) {
+                        QueryPage<FunnelQueryService.FunnelRow> page =
+                                funnelQuery.query("concurrent_funnel", 1, null, null, null, 50, null);
+                        for (var row : page.rows()) {
+                            long verdicts = row.converted() + row.skipped() + row.missing()
+                                    + row.outOfWindow() + row.pending();
+                            assertEquals(row.entered(), verdicts,
+                                    "row mixes snapshots: " + row);
+                        }
+                        Thread.yield();
+                    }
+                } catch (Exception e) {
+                    errors.incrementAndGet();
+                    e.printStackTrace();
+                }
+            }));
+        }
+
+        start.countDown();
+        for (Future<?> f : futures) {
+            f.get();
+        }
+        pool.shutdown();
+        assertEquals(0, errors.get(), "concurrent operations had errors");
+
+        // settle: final build + verification must pass cleanly (no false mismatch
+        // was latched into the gate during the concurrent phase)
+        builder.runIncremental(def);
+        var report = verifier.verifyNow(def);
+        assertNotNull(report);
+        assertEquals(com.github.diudiuseven.productmetricspipelinejava.verify.VerificationStatus.VERIFIED,
+                report.status());
+        assertFalse(store.loadGate("concurrent_funnel", 1)
+                .map(g -> g.blocked()).orElse(false), "gate must stay open");
     }
 }

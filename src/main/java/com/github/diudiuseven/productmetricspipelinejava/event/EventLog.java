@@ -92,7 +92,14 @@ public class EventLog {
                 rowMapper, seq, limit);
     }
 
-    /** All active (latest-op-wins, non-deleted) events for a user, by event time. */
+    /**
+     * All active (latest-op-wins, non-deleted) events for a user, by event time.
+     *
+     * @deprecated build paths must use {@link #findActiveByUserUpTo} so a
+     *             published snapshot stays an exact function of the committed
+     *             prefix; this unbounded read is kept for diagnostics only.
+     */
+    @Deprecated
     public List<StoredEvent> findActiveByUser(String userId) {
         return jdbcTemplate.query(
                 "SELECT e.* FROM event_log e "
@@ -100,6 +107,22 @@ public class EventLog {
                         + "AND e.log_seq = (SELECT MAX(e2.log_seq) FROM event_log e2 WHERE e2.event_id = e.event_id) "
                         + "ORDER BY e.event_time, e.log_seq",
                 rowMapper, userId);
+    }
+
+    /**
+     * Active events for a user considering only records with {@code log_seq <= seq}.
+     * Latest-op-wins is also bounded: a correction beyond {@code seq} does not
+     * hide the original record. Makes a snapshot an exact function of the
+     * committed prefix [1, seq].
+     */
+    public List<StoredEvent> findActiveByUserUpTo(String userId, long seq) {
+        return jdbcTemplate.query(
+                "SELECT e.* FROM event_log e "
+                        + "WHERE e.user_id = ? AND e.op <> 'DELETE' AND e.log_seq <= ? "
+                        + "AND e.log_seq = (SELECT MAX(e2.log_seq) FROM event_log e2 "
+                        + "                 WHERE e2.event_id = e.event_id AND e2.log_seq <= ?) "
+                        + "ORDER BY e.event_time, e.log_seq",
+                rowMapper, userId, seq, seq);
     }
 
     /** All active events ordered by (event_time, log_seq) — full replay input. */
@@ -110,6 +133,20 @@ public class EventLog {
                         + "AND e.log_seq = (SELECT MAX(e2.log_seq) FROM event_log e2 WHERE e2.event_id = e.event_id) "
                         + "ORDER BY e.event_time, e.log_seq",
                 rowMapper);
+    }
+
+    /**
+     * All active events with {@code log_seq <= seq} — replay input bounded to a
+     * committed prefix. Corrections/deletes beyond {@code seq} are invisible.
+     */
+    public List<StoredEvent> findAllActiveOrderedUpTo(long seq) {
+        return jdbcTemplate.query(
+                "SELECT e.* FROM event_log e "
+                        + "WHERE e.op <> 'DELETE' AND e.log_seq <= ? "
+                        + "AND e.log_seq = (SELECT MAX(e2.log_seq) FROM event_log e2 "
+                        + "                 WHERE e2.event_id = e.event_id AND e2.log_seq <= ?) "
+                        + "ORDER BY e.event_time, e.log_seq",
+                rowMapper, seq, seq);
     }
 
     public long maxSeq() {

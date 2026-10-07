@@ -35,6 +35,29 @@
 
 任意时刻，对任意指标版本，`增量结果 == 全量重算结果`（逐条比对相等）。
 
+### 2a. 快照是已提交输入前缀的纯函数
+
+- 每次提交对应一个确定的事件日志前缀 `[1, log_seq_to]`；构建时读取的事件**按该前缀定界**（晚于 `log_seq_to` 到达的事件不参与本次提交，留给下一批）。
+- 判定不依赖墙钟：开放窗口的判定基准是"该用户已提交事件的最大 `eventTime`"（见 [漏斗与留存语义](funnel-retention-semantics.md#判定的时间基准decision-basis)）。
+- 维度归并是粘性且确定性的：已提交分组不改写，新组按字典序录取（见语义文档"维度上界与溢出归并"）。
+
+推论：**只有时间推移、没有新事件时，已提交结果不会发生任何变化**；同一批输入的增量结果与全量重算结果逐条一致。
+
+### 2b. 持续一致性比对（verification）
+
+系统内部持续把"已发布快照"与"对同一已提交前缀的从头重放"逐条比对：
+
+- **触发**：每次提交（增量或重算）后；无新提交时按 `pipeline.verification-interval` 周期复查（覆盖"只有时间推移"的情形）。
+- **比对内容**：逐用户的贡献行（`funnel_user` / `retention_user`）与逐分组的聚合行（`funnel_agg` / `retention_agg`），重放侧应用与重算完全相同的粘性维度归并规则。
+- **比对未通过（MISMATCH）**：该指标的发布门禁（`metric_gate`）置为 `BLOCKED`——不再发布任何新的增量结果；随后自动触发一次修复性全量重算，重算发布并再次比对通过后门禁才重新打开。比对报告持久化在 `consistency_report`，`diff_detail` 中给出可定位到**具体用户**（`FUNNEL_USER` / `RETENTION_USER`）与**具体分组**（`FUNNEL_AGG` / `RETENTION_AGG`，含 bucket/cohort 与 dims）的差异（expected = 重放值，actual = 已发布值），条数受 `pipeline.verification-max-diffs` 上界约束。
+- **可区分的状态与失败原因**（`GET /api/admin/consistency/{id}` 可查）：
+  - `VERIFIED`：逐条一致。
+  - `MISMATCH` + `CONSISTENCY_MISMATCH`：已发布结果与全量重放不一致。
+  - `SKIPPED_BOUNDS` + `BOUNDS_EXCEEDED`：输入超出 `pipeline.recompute-max-events`，本次未执行比对（不阻塞门禁）。
+  - `NO_COMMITTED_SNAPSHOT` + `DECISION_BASIS_UNDETERMINED`：尚无已提交输入，判定基准无法确定。
+- **资源上界**：比对在对应指标自己的构建线程上执行，单指标变慢不阻塞其他指标；差异明细条数、复查间隔均有配置上界；比对对快照只读，不阻塞摄入与查询。
+- **验证方法**（人工复核）：`GET /api/admin/consistency/{id}` 查看门禁与最近报告；或对某指标 `POST /api/admin/recompute/{id}` 后用 `GET /api/admin/commits/{id}` 核对重算前后结果未变。
+
 ### 3. 快照原子发布（无新旧混合）
 
 - 每次发布是一个数据库事务：写入聚合行 + 用户贡献行 + 提交记录 + 检查点，要么全部生效要么全部不生效。
@@ -66,6 +89,12 @@
 - 重启时，所有遗留 `RUNNING` 任务标记为 `INTERRUPTED` 并删除其 scratch；已提交的快照不受影响。
 - 已提交结果（`snapshot_commit` 状态 `COMMITTED`）与未完成任务（`recompute_task` 状态 `RUNNING/INTERRUPTED`）在表结构上可区分。
 
+### 门禁与比对报告的恢复
+
+- 发布门禁（`metric_gate`）与比对报告（`consistency_report`）均持久化，重启后保持。
+- 重启时若某指标门禁仍为 `BLOCKED`，恢复流程自动补跑一次修复性全量重算并重新比对；比对通过后门禁重新打开。
+- 恢复后增量构建从检查点继续，最终状态仍与全量重算对齐。
+
 ### 幂等摄入
 
 - 重复上报同一事件（相同 eventId + payload）返回已有 `log_seq`，不产生新行。
@@ -92,8 +121,10 @@
 | `pipeline.max-affected-users` | 2000 | 单批最多重放的用户数，超出触发全量重算 |
 | `pipeline.max-events-per-user` | 10000 | 单用户事件数安全熔断，超出触发全量重算 |
 | `pipeline.max-dim-combinations` | 50000 | 维度组数上界（超出部分计入 `__overflow__`，见提交摘要） |
-| `pipeline.recompute-max-events` | 2000000 | 重算事件数告警阈值（超出仍重算） |
+| `pipeline.recompute-max-events` | 2000000 | 重算/比对事件数告警阈值（超出仍重算；比对则记 `SKIPPED_BOUNDS`） |
 | `pipeline.thread-pool-size` | 4 | 指标构建器并行线程数 |
+| `pipeline.verification-interval` | 30s | 同一指标两次一致性比对的最小间隔 |
+| `pipeline.verification-max-diffs` | 50 | 单份比对报告最多记录的差异条数 |
 | `pipeline.query-timeout` | 5s | 查询硬超时 |
 | `pipeline.default-page-size` | 100 | 默认分页大小 |
 | `pipeline.max-page-size` | 1000 | 分页大小上界 |

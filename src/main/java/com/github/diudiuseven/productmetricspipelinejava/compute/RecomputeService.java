@@ -51,25 +51,34 @@ public class RecomputeService {
             long fromSeq = cp == null ? 0L : cp.logSeq();
             taskId = store.createRecomputeTask(def.getId(), def.getVersion(), fromSeq, toSeq);
 
-            List<StoredEvent> events = eventLog.findAllActiveOrdered();
+            List<StoredEvent> events = eventLog.findAllActiveOrderedUpTo(toSeq);
             if (events.size() > props.getRecomputeMaxEvents()) {
                 log.warn("recompute {}: active events {} exceed bound {}", key, events.size(),
                         props.getRecomputeMaxEvents());
             }
             ReplayResult result = engine.replay(def, events);
 
-            // cap dimension cardinality (safety fuse) and re-aggregate
+            // Cap dimension cardinality with the STICKY rule against the same
+            // committed state the incremental path sees: committed users keep
+            // their group assignment (overflow stays overflow, unchanged
+            // detailed groups stay), only new or corrected users are capped
+            // fresh. A recompute therefore never rewrites stable groups and
+            // selects exactly the groups the incremental path would.
             if (def.getType() == com.github.diudiuseven.productmetricspipelinejava.metric.MetricType.FUNNEL) {
-                Map<String, FunnelContribution> cappedUsers = ReplayEngine.capFunnelDims(
-                        result.funnelUsers(), java.util.Set.of(), props.getMaxDimCombinations());
+                Map<String, FunnelContribution> cappedUsers = ReplayEngine.capFunnelDimsSticky(
+                        result.funnelUsers(), store.loadAllFunnelUsers(def.getId(), def.getVersion()),
+                        store.loadCurrentFunnelDims(def.getId(), def.getVersion()),
+                        props.getMaxDimCombinations());
                 result = new ReplayResult(
                         ReplayEngine.aggregateFunnel(cappedUsers, def.getFunnel().steps().size()),
                         result.retention(),
                         cappedUsers,
                         result.retentionUsers());
             } else {
-                Map<String, RetentionContribution> cappedUsers = ReplayEngine.capRetentionDims(
-                        result.retentionUsers(), java.util.Set.of(), props.getMaxDimCombinations());
+                Map<String, RetentionContribution> cappedUsers = ReplayEngine.capRetentionDimsSticky(
+                        result.retentionUsers(), store.loadAllRetentionUsers(def.getId(), def.getVersion()),
+                        store.loadCurrentRetentionDims(def.getId(), def.getVersion()),
+                        props.getMaxDimCombinations());
                 result = new ReplayResult(
                         result.funnel(),
                         ReplayEngine.aggregateRetention(cappedUsers, def.getRetention().periods().size()),

@@ -114,3 +114,33 @@
 ### GET /api/admin/commits/{id}?version={v}
 
 列出最近提交记录（含 `logSeqFrom/To`、`eventCount`、`trigger`、`status`），用于解释结果来源。
+
+### GET /api/admin/consistency/{id}?version={v}
+
+返回该指标的发布门禁与最近的一致性比对报告：
+
+```json
+{
+  "metricId": "signup_funnel",
+  "version": 1,
+  "gate": { "status": "OPEN", "reason": "" },
+  "latestReport": {
+    "reportId": 12,
+    "commitId": 42,
+    "logSeq": 1337,
+    "status": "VERIFIED",
+    "reason": null,
+    "diffCount": 0,
+    "diffDetail": null,
+    "createdAt": "2026-10-07T10:00:00Z"
+  },
+  "recentReports": [ ]
+}
+```
+
+- `gate.status`：`OPEN` / `BLOCKED`。`BLOCKED` 时不再发布新的增量结果（查询仍读最后一个已提交快照），修复性重算比对通过后自动重新打开。
+- 报告 `status` 与 `reason`（可区分的失败原因）：
+  - `VERIFIED`：已发布快照与同前缀全量重放逐条一致。
+  - `MISMATCH` / `CONSISTENCY_MISMATCH`：逐条比对未通过；`diffDetail` 为 JSON 数组，每条含 `scope`（`FUNNEL_USER` / `RETENTION_USER` / `FUNNEL_AGG` / `RETENTION_AGG`）、`key`（用户 ID 或 `bucket␀dims` 分组键）、`expected`（重放值）、`actual`（已发布值）。
+  - `SKIPPED_BOUNDS` / `BOUNDS_EXCEEDED`：输入超出资源上界，本次未比对。
+  - `NO_COMMITTED_SNAPSHOT` / `DECISION_BASIS_UNDETERMINED`：尚无已提交输入，判定基准无法确定。

@@ -26,6 +26,10 @@ public class PipelineProperties {
     private long recomputeMaxEvents = 2_000_000L;
     /** Worker threads for parallel metric builders. */
     private int threadPoolSize = 4;
+    /** Min interval between two verification runs of the same metric. */
+    private Duration verificationInterval = Duration.ofSeconds(30);
+    /** Max diff entries recorded in one consistency report. */
+    private int verificationMaxDiffs = 50;
     /** Hard query timeout; timed-out queries return no rows at all. */
     private Duration queryTimeout = Duration.ofSeconds(5);
     private int defaultPageSize = 100;
@@ -48,6 +52,10 @@ public class PipelineProperties {
     public void setRecomputeMaxEvents(long recomputeMaxEvents) { this.recomputeMaxEvents = recomputeMaxEvents; }
     public int getThreadPoolSize() { return threadPoolSize; }
     public void setThreadPoolSize(int threadPoolSize) { this.threadPoolSize = threadPoolSize; }
+    public Duration getVerificationInterval() { return verificationInterval; }
+    public void setVerificationInterval(Duration verificationInterval) { this.verificationInterval = verificationInterval; }
+    public int getVerificationMaxDiffs() { return verificationMaxDiffs; }
+    public void setVerificationMaxDiffs(int verificationMaxDiffs) { this.verificationMaxDiffs = verificationMaxDiffs; }
     public Duration getQueryTimeout() { return queryTimeout; }
     public void setQueryTimeout(Duration queryTimeout) { this.queryTimeout = queryTimeout; }
     public int getDefaultPageSize() { return defaultPageSize; }

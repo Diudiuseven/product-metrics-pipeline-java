@@ -21,10 +21,12 @@ public class RecoveryService {
 
     private final DefinitionRegistry registry;
     private final AggregateStore store;
+    private final ComputeScheduler scheduler;
 
-    public RecoveryService(DefinitionRegistry registry, AggregateStore store) {
+    public RecoveryService(DefinitionRegistry registry, AggregateStore store, ComputeScheduler scheduler) {
         this.registry = registry;
         this.store = store;
+        this.scheduler = scheduler;
     }
 
     @EventListener(ApplicationReadyEvent.class)
@@ -44,6 +46,16 @@ public class RecoveryService {
         if (!running.isEmpty()) {
             log.info("recovery: {} interrupted task(s) cleaned; committed snapshots untouched", running.size());
         }
-        // 3. builders resume from their last committed checkpoint on the next tick.
+
+        // 3. blocked publish gates survive restarts: resume the healing
+        //    recompute so the metric converges back to a verified state.
+        for (com.github.diudiuseven.productmetricspipelinejava.verify.MetricGate gate
+                : store.findBlockedGates()) {
+            log.warn("recovery: metric {} v{} gate still BLOCKED ({}); scheduling healing recompute",
+                    gate.metricId(), gate.version(), gate.reason());
+            registry.get(gate.metricId(), gate.version()).ifPresent(def ->
+                    scheduler.requestRecompute(gate.metricId(), gate.version(), "RECOVERY_HEAL"));
+        }
+        // 4. builders resume from their last committed checkpoint on the next tick.
     }
 }

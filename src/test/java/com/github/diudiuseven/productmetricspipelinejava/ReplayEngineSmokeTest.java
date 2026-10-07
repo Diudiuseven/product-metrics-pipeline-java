@@ -88,20 +88,36 @@ class ReplayEngineSmokeTest {
 
     @Test
     void missingWhenWindowExpired() {
+        // Window expiry is judged against the user's own latest committed event
+        // time (the deterministic decision basis), never the wall clock. A
+        // later unrelated event at t0+2h closes the basis past the 1h window.
         List<StoredEvent> events = List.of(
-                ev("e1", "u1", "page_view", t0));
+                ev("e1", "u1", "page_view", t0),
+                ev("e2", "u1", "heartbeat", t0.plus(Duration.ofHours(2))));
         FunnelContribution c = engine.evaluateFunnel(funnel(), events);
         assertEquals(FunnelVerdict.MISSING, c.verdict());
     }
 
     @Test
     void pendingWhenWindowOpen() {
-        // event time is "now"-ish relative to window? use a time close to now
-        Instant now = Instant.now();
+        // Only a step-1 event: the decision basis is the event's own time, so
+        // the window is still open regardless of when the evaluation runs.
         List<StoredEvent> events = List.of(
-                ev("e1", "u1", "page_view", now.minus(Duration.ofMinutes(5))));
+                ev("e1", "u1", "page_view", t0));
         FunnelContribution c = engine.evaluateFunnel(funnel(), events);
         assertEquals(FunnelVerdict.PENDING, c.verdict());
+    }
+
+    @Test
+    void verdictIsStableAcrossEvaluationInstants() throws Exception {
+        // Reproducibility: the same committed input yields the same verdict no
+        // matter when the evaluation happens (no wall-clock dependence).
+        List<StoredEvent> events = List.of(
+                ev("e1", "u1", "page_view", t0));
+        FunnelContribution first = engine.evaluateFunnel(funnel(), events);
+        Thread.sleep(50);
+        FunnelContribution second = engine.evaluateFunnel(funnel(), events);
+        assertEquals(first, second);
     }
 
     @Test

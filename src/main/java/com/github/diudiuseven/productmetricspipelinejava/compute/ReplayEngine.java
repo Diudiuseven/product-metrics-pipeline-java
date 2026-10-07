@@ -27,6 +27,11 @@ import java.util.Set;
  * OUT_OF_WINDOW (in order but late) > MISSING (window expired, unfinished) >
  * PENDING (window still open) > ENTERED.
  *
+ * <p>Time basis: whether a window is "expired" is judged against the
+ * <em>decision horizon</em> — the max event_time of the user's committed
+ * events — never the wall clock. Verdicts are therefore reproducible for the
+ * same committed input and cannot drift while no new events arrive.
+ *
  * <p>Retention semantics: anchor = the user's FIRST anchor event ever; cohort =
  * bucket of that anchor; retained for period i if a return event lands in
  * [anchor + period, anchor + period + returnWindow).
@@ -173,7 +178,12 @@ public class ReplayEngine {
             }
         }
         if (curStep > 0 && attemptVerdict == null) {
-            attemptVerdict = Instant.now().isAfter(start.plus(window))
+            // Decision horizon: the max event_time of this user's committed
+            // events — a pure function of the committed input, never of the
+            // wall clock. An open attempt flips to MISSING only once the
+            // user's own committed timeline provably passed the window.
+            Instant horizon = decisionHorizon(sorted);
+            attemptVerdict = horizon.isAfter(start.plus(window))
                     ? FunnelVerdict.MISSING : FunnelVerdict.PENDING;
             bestMask |= attemptMask;
             if (verdictRank(attemptVerdict) > verdictRank(bestVerdict)) {
@@ -233,6 +243,23 @@ public class ReplayEngine {
             return c != 0 ? c : Long.compare(a.logSeq(), b.logSeq());
         });
         return sorted;
+    }
+
+    /**
+     * The deterministic time basis for open-attempt verdicts: the maximum
+     * event_time among the user's committed events. It advances only when new
+     * input for this user is committed, so committed verdicts never drift
+     * while no new events arrive.
+     */
+    public static Instant decisionHorizon(List<StoredEvent> userEvents) {
+        Instant horizon = null;
+        for (StoredEvent se : userEvents) {
+            Instant t = se.event().eventTime();
+            if (horizon == null || t.isAfter(horizon)) {
+                horizon = t;
+            }
+        }
+        return horizon;
     }
 
     private static void accumulateFunnel(Map<String, FunnelAggregate> agg, FunnelContribution c, int steps) {
@@ -319,19 +346,27 @@ public class ReplayEngine {
     public static final String OVERFLOW_DIMS = "__overflow__";
 
     /**
-     * Caps the number of distinct dimension tuples. Existing tuples are always
-     * kept; new tuples beyond the bound are merged into {@value #OVERFLOW_DIMS}.
-     * New tuples are selected in deterministic (bucket, dims) order so the rule
-     * is identical for incremental and full-recompute paths.
+     * Caps the number of distinct dimension tuples. The selection is sticky
+     * and deterministic: tuples already materialised as detail groups
+     * ({@code existingDims}) are always kept — a recompute never rewrites a
+     * stable group — and remaining slots are filled with new tuples in
+     * lexicographic order, so the incremental path and the full-recompute
+     * path always select the same groups for the same committed input.
+     * The overflow pseudo-tuple never consumes a detail slot.
      */
     public static Map<String, FunnelContribution> capFunnelDims(Map<String, FunnelContribution> users,
                                                                 Set<String> existingDims, int max) {
         if (max <= 0 || users.isEmpty()) {
             return users;
         }
-        Set<String> keep = new java.util.TreeSet<>(existingDims);
+        Set<String> keep = new java.util.TreeSet<>();
+        for (String d : existingDims) {
+            if (!OVERFLOW_DIMS.equals(d) && keep.size() < max) {
+                keep.add(d);
+            }
+        }
         List<String> newDims = users.values().stream().map(FunnelContribution::dims).distinct()
-                .filter(d -> !existingDims.contains(d)).sorted().toList();
+                .filter(d -> !keep.contains(d) && !OVERFLOW_DIMS.equals(d)).sorted().toList();
         for (String d : newDims) {
             if (keep.size() >= max) {
                 break;
@@ -349,9 +384,14 @@ public class ReplayEngine {
         if (max <= 0 || users.isEmpty()) {
             return users;
         }
-        Set<String> keep = new java.util.TreeSet<>(existingDims);
+        Set<String> keep = new java.util.TreeSet<>();
+        for (String d : existingDims) {
+            if (!OVERFLOW_DIMS.equals(d) && keep.size() < max) {
+                keep.add(d);
+            }
+        }
         List<String> newDims = users.values().stream().map(RetentionContribution::dims).distinct()
-                .filter(d -> !existingDims.contains(d)).sorted().toList();
+                .filter(d -> !keep.contains(d) && !OVERFLOW_DIMS.equals(d)).sorted().toList();
         for (String d : newDims) {
             if (keep.size() >= max) {
                 break;

@@ -94,22 +94,43 @@ public class EventLog {
 
     /** All active (latest-op-wins, non-deleted) events for a user, by event time. */
     public List<StoredEvent> findActiveByUser(String userId) {
+        return findActiveByUserUpTo(userId, Long.MAX_VALUE);
+    }
+
+    /**
+     * Active events for a user as of a committed log position. Only records
+     * with {@code log_seq <= maxSeq} participate (both as candidates and when
+     * resolving latest-op-wins), so the result is a pure function of the
+     * committed input prefix and never changes when newer events arrive.
+     */
+    public List<StoredEvent> findActiveByUserUpTo(String userId, long maxSeq) {
         return jdbcTemplate.query(
                 "SELECT e.* FROM event_log e "
-                        + "WHERE e.user_id = ? AND e.op <> 'DELETE' "
-                        + "AND e.log_seq = (SELECT MAX(e2.log_seq) FROM event_log e2 WHERE e2.event_id = e.event_id) "
+                        + "WHERE e.user_id = ? AND e.op <> 'DELETE' AND e.log_seq <= ? "
+                        + "AND e.log_seq = (SELECT MAX(e2.log_seq) FROM event_log e2 "
+                        + "WHERE e2.event_id = e.event_id AND e2.log_seq <= ?) "
                         + "ORDER BY e.event_time, e.log_seq",
-                rowMapper, userId);
+                rowMapper, userId, maxSeq, maxSeq);
     }
 
     /** All active events ordered by (event_time, log_seq) — full replay input. */
     public List<StoredEvent> findAllActiveOrdered() {
+        return findAllActiveOrderedUpTo(Long.MAX_VALUE);
+    }
+
+    /**
+     * All active events as of a committed log position. Replays against this
+     * prefix are reproducible: the same {@code maxSeq} always yields the same
+     * input regardless of what arrived afterwards.
+     */
+    public List<StoredEvent> findAllActiveOrderedUpTo(long maxSeq) {
         return jdbcTemplate.query(
                 "SELECT e.* FROM event_log e "
-                        + "WHERE e.op <> 'DELETE' "
-                        + "AND e.log_seq = (SELECT MAX(e2.log_seq) FROM event_log e2 WHERE e2.event_id = e.event_id) "
+                        + "WHERE e.op <> 'DELETE' AND e.log_seq <= ? "
+                        + "AND e.log_seq = (SELECT MAX(e2.log_seq) FROM event_log e2 "
+                        + "WHERE e2.event_id = e.event_id AND e2.log_seq <= ?) "
                         + "ORDER BY e.event_time, e.log_seq",
-                rowMapper);
+                rowMapper, maxSeq, maxSeq);
     }
 
     public long maxSeq() {
@@ -118,10 +139,16 @@ public class EventLog {
     }
 
     public long countActive() {
+        return countActiveUpTo(Long.MAX_VALUE);
+    }
+
+    /** Active event count as of a committed log position. */
+    public long countActiveUpTo(long maxSeq) {
         Long v = jdbcTemplate.queryForObject(
-                "SELECT COUNT(*) FROM event_log e WHERE e.op <> 'DELETE' "
-                        + "AND e.log_seq = (SELECT MAX(e2.log_seq) FROM event_log e2 WHERE e2.event_id = e.event_id)",
-                Long.class);
+                "SELECT COUNT(*) FROM event_log e WHERE e.op <> 'DELETE' AND e.log_seq <= ? "
+                        + "AND e.log_seq = (SELECT MAX(e2.log_seq) FROM event_log e2 "
+                        + "WHERE e2.event_id = e.event_id AND e2.log_seq <= ?)",
+                Long.class, maxSeq, maxSeq);
         return v == null ? 0L : v;
     }
 

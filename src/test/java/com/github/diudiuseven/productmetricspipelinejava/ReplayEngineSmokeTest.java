@@ -88,20 +88,35 @@ class ReplayEngineSmokeTest {
 
     @Test
     void missingWhenWindowExpired() {
+        // the user's committed timeline advanced past the window (an unrelated
+        // later event) without the funnel completing -> MISSING
         List<StoredEvent> events = List.of(
-                ev("e1", "u1", "page_view", t0));
+                ev("e1", "u1", "page_view", t0),
+                ev("e2", "u1", "something_else", t0.plus(Duration.ofHours(2))));
         FunnelContribution c = engine.evaluateFunnel(funnel(), events);
         assertEquals(FunnelVerdict.MISSING, c.verdict());
     }
 
     @Test
     void pendingWhenWindowOpen() {
-        // event time is "now"-ish relative to window? use a time close to now
-        Instant now = Instant.now();
+        // horizon = the user's own max committed event_time; with only the
+        // step-1 event committed the window is still open -> PENDING,
+        // regardless of the wall clock at evaluation time
         List<StoredEvent> events = List.of(
-                ev("e1", "u1", "page_view", now.minus(Duration.ofMinutes(5))));
+                ev("e1", "u1", "page_view", t0));
         FunnelContribution c = engine.evaluateFunnel(funnel(), events);
         assertEquals(FunnelVerdict.PENDING, c.verdict());
+    }
+
+    @Test
+    void verdictIsWallClockIndependent() {
+        // same committed input evaluated at different instants -> same verdict
+        List<StoredEvent> events = List.of(
+                ev("e1", "u1", "page_view", t0));
+        FunnelContribution first = engine.evaluateFunnel(funnel(), events);
+        FunnelContribution second = engine.evaluateFunnel(funnel(), events);
+        assertEquals(first, second);
+        assertEquals(FunnelVerdict.PENDING, first.verdict());
     }
 
     @Test

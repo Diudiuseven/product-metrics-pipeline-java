@@ -105,7 +105,11 @@ class PipelineIntegrationTest {
         ingest.ingest(evt("e5", "u2", "add_cart", t0.plus(Duration.ofMinutes(70)), "US")); // oow
         ingest.ingest(evt("e6", "u3", "page_view", t0, "US"));
         ingest.ingest(evt("e7", "u3", "purchase", t0.plus(Duration.ofMinutes(10)), "US")); // skipped
-        ingest.ingest(evt("e8", "u4", "page_view", t0, "DE"));                            // missing
+        ingest.ingest(evt("e8", "u4", "page_view", t0, "DE"));
+        // u4's committed timeline advances past the 1h window without the
+        // funnel completing -> MISSING (deterministic: driven by committed
+        // input, not by the wall clock)
+        ingest.ingest(evt("e8b", "u4", "heartbeat", t0.plus(Duration.ofHours(2)), "DE"));
 
         builder.runIncremental(funnelDef);
 

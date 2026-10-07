@@ -79,6 +79,20 @@ public class AggregateStore {
         return map;
     }
 
+    /** Distinct dimension tuples currently materialised as detail groups. */
+    public java.util.Set<String> loadCurrentFunnelDims(String metricId, int version) {
+        return new java.util.TreeSet<>(jdbcTemplate.queryForList(
+                "SELECT DISTINCT dims FROM funnel_agg WHERE metric_id = ? AND version = ?",
+                String.class, metricId, version));
+    }
+
+    /** Distinct dimension tuples currently materialised as detail groups. */
+    public java.util.Set<String> loadCurrentRetentionDims(String metricId, int version) {
+        return new java.util.TreeSet<>(jdbcTemplate.queryForList(
+                "SELECT DISTINCT dims FROM retention_agg WHERE metric_id = ? AND version = ?",
+                String.class, metricId, version));
+    }
+
     public Map<String, FunnelContribution> loadFunnelUsers(String metricId, int version,
                                                             Collection<String> userIds) {
         Map<String, FunnelContribution> map = new LinkedHashMap<>();

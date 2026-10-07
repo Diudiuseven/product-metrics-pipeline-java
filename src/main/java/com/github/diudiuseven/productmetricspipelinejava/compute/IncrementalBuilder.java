@@ -67,7 +67,10 @@ public class IncrementalBuilder {
         Map<String, RetentionContribution> newRetentionUsers = new LinkedHashMap<>();
         List<String> deletedUsers = new ArrayList<>();
         for (String userId : affectedUsers) {
-            List<StoredEvent> userEvents = eventLog.findActiveByUser(userId);
+            // Evaluate from the committed prefix only (log_seq <= toSeq), so
+            // the candidate snapshot is a pure function of committed input
+            // and cannot be contaminated by events arriving mid-build.
+            List<StoredEvent> userEvents = eventLog.findActiveByUserUpTo(userId, toSeq);
             if (userEvents.size() > props.getMaxEventsPerUser()) {
                 log.info("metric {} v{}: user {} events {} > bound {}, triggering recompute",
                         def.getId(), def.getVersion(), userId, userEvents.size(),
@@ -91,16 +94,13 @@ public class IncrementalBuilder {
             }
         }
 
-        // 1b. cap dimension cardinality (safety fuse)
+        // 1b. cap dimension cardinality (safety fuse). Sticky rule shared with
+        // the recompute path: existing detail groups are always kept.
         if (funnel) {
-            Set<String> existingDims = store.loadCurrentFunnel(def.getId(), def.getVersion()).keySet().stream()
-                    .map(k -> k.substring(k.indexOf('\u0000') + 1))
-                    .collect(java.util.stream.Collectors.toCollection(java.util.TreeSet::new));
+            Set<String> existingDims = store.loadCurrentFunnelDims(def.getId(), def.getVersion());
             newFunnelUsers = ReplayEngine.capFunnelDims(newFunnelUsers, existingDims, props.getMaxDimCombinations());
         } else {
-            Set<String> existingDims = store.loadCurrentRetention(def.getId(), def.getVersion()).keySet().stream()
-                    .map(k -> k.substring(k.indexOf('\u0000') + 1))
-                    .collect(java.util.stream.Collectors.toCollection(java.util.TreeSet::new));
+            Set<String> existingDims = store.loadCurrentRetentionDims(def.getId(), def.getVersion());
             newRetentionUsers = ReplayEngine.capRetentionDims(newRetentionUsers, existingDims, props.getMaxDimCombinations());
         }
 

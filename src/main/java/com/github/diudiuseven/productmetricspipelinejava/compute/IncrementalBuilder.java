@@ -30,14 +30,17 @@ public class IncrementalBuilder {
     private final EventLog eventLog;
     private final PipelineProperties props;
     private final ConsistencyVerifier verifier;
+    private final MetricBuildLocks buildLocks;
 
     public IncrementalBuilder(ReplayEngine engine, AggregateStore store, EventLog eventLog,
-                              PipelineProperties props, ConsistencyVerifier verifier) {
+                              PipelineProperties props, ConsistencyVerifier verifier,
+                              MetricBuildLocks buildLocks) {
         this.engine = engine;
         this.store = store;
         this.eventLog = eventLog;
         this.props = props;
         this.verifier = verifier;
+        this.buildLocks = buildLocks;
     }
 
     /**
@@ -47,6 +50,13 @@ public class IncrementalBuilder {
      * candidate (both negative codes ask the caller to escalate to recompute).
      */
     public long runIncremental(MetricDefinition def) {
+        // builds of the same metric (incremental vs recompute) never overlap
+        synchronized (buildLocks.of(def.getId(), def.getVersion())) {
+            return doRunIncremental(def);
+        }
+    }
+
+    private long doRunIncremental(MetricDefinition def) {
         BuilderCheckpoint cp = store.loadCheckpoint(def.getId(), def.getVersion())
                 .orElse(new BuilderCheckpoint(def.getId(), def.getVersion(), 0L, 0L, java.time.Instant.now()));
         List<StoredEvent> newEvents = eventLog.findAfterSeq(cp.logSeq(), props.getMaxBatchEvents());

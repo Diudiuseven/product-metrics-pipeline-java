@@ -283,6 +283,83 @@ class ConsistencyDeterminismTest {
     }
 
     @Test
+    void queriesSeeOnlyCommittedWholesDuringConcurrentRecomputeAndIngest() throws Exception {
+        for (int i = 0; i < 60; i++) {
+            ingest.ingest(evt("s" + i + "a", "u" + i, "page_view",
+                    t0.plus(Duration.ofMinutes(i % 30)), "US"));
+            ingest.ingest(evt("s" + i + "b", "u" + i, "purchase",
+                    t0.plus(Duration.ofMinutes(i % 30)).plus(Duration.ofMinutes(5)), "US"));
+        }
+        builder.runIncremental(def);
+
+        java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(3);
+        java.util.concurrent.atomic.AtomicInteger errors = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
+        var futures = new java.util.ArrayList<java.util.concurrent.Future<?>>();
+
+        // writer: more events + incremental builds
+        futures.add(pool.submit(() -> {
+            try {
+                start.await();
+                for (int i = 60; i < 90; i++) {
+                    ingest.ingest(evt("s" + i + "a", "u" + i, "page_view",
+                            t0.plus(Duration.ofMinutes(i % 30)), "DE"));
+                    builder.runIncremental(def);
+                }
+            } catch (Exception e) {
+                errors.incrementAndGet();
+                e.printStackTrace();
+            }
+        }));
+        // recompute loop
+        futures.add(pool.submit(() -> {
+            try {
+                start.await();
+                for (int i = 0; i < 3; i++) {
+                    recomputeService.recompute(def, "MANUAL");
+                }
+            } catch (Exception e) {
+                errors.incrementAndGet();
+                e.printStackTrace();
+            }
+        }));
+        // reader: every observed page must be internally self-consistent
+        futures.add(pool.submit(() -> {
+            try {
+                start.await();
+                for (int i = 0; i < 200; i++) {
+                    QueryPage<FunnelQueryService.FunnelRow> page = query();
+                    for (FunnelQueryService.FunnelRow row : page.rows()) {
+                        assertTrue(row.entered() >= row.converted(), "row not self-consistent");
+                        for (long sc : row.stepCounts()) {
+                            assertTrue(sc <= row.entered() && sc >= 0, "step count out of range");
+                        }
+                        assertEquals(row.entered(),
+                                row.converted() + row.skipped() + row.missing()
+                                        + row.outOfWindow() + row.pending(),
+                                "verdicts must partition entered users");
+                    }
+                    Thread.yield();
+                }
+            } catch (Exception e) {
+                errors.incrementAndGet();
+                e.printStackTrace();
+            }
+        }));
+        start.countDown();
+        for (var f : futures) {
+            f.get();
+        }
+        pool.shutdown();
+        assertEquals(0, errors.get());
+
+        // after everything settles, the state verifies clean against a full replay
+        builder.runIncremental(def);
+        assertEquals(VerificationStatus.VERIFIED, verifier.verifyCommitted(def));
+        assertRowIdenticalToReplay();
+    }
+
+    @Test
     void recoveryAlignsWithFullRecompute() {
         ingest.ingest(evt("e1", "u1", "page_view", t0, "US"));
         ingest.ingest(evt("e2", "u1", "purchase", t0.plus(Duration.ofMinutes(5)), "US"));

@@ -27,14 +27,16 @@ public class RecomputeService {
     private final AggregateStore store;
     private final EventLog eventLog;
     private final PipelineProperties props;
+    private final MetricBuildLocks buildLocks;
     private final Set<String> running = ConcurrentHashMap.newKeySet();
 
     public RecomputeService(ReplayEngine engine, AggregateStore store, EventLog eventLog,
-                            PipelineProperties props) {
+                            PipelineProperties props, MetricBuildLocks buildLocks) {
         this.engine = engine;
         this.store = store;
         this.eventLog = eventLog;
         this.props = props;
+        this.buildLocks = buildLocks;
     }
 
     /** Recomputes the metric from scratch and returns the new commit id. */
@@ -44,6 +46,18 @@ public class RecomputeService {
             log.info("recompute already running for {}", key);
             return 0L;
         }
+        try {
+            // serialized with incremental builds of the same metric, so the
+            // publish never interleaves with a concurrent incremental commit
+            synchronized (buildLocks.of(def.getId(), def.getVersion())) {
+                return doRecompute(def, trigger, key);
+            }
+        } finally {
+            running.remove(key);
+        }
+    }
+
+    private long doRecompute(MetricDefinition def, String trigger, String key) {
         long taskId = 0L;
         try {
             long toSeq = eventLog.maxSeq();
@@ -109,8 +123,6 @@ public class RecomputeService {
                 store.deleteScratch(taskId);
             }
             throw e;
-        } finally {
-            running.remove(key);
         }
     }
 
